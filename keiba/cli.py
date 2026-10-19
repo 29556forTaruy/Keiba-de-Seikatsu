@@ -236,6 +236,8 @@ def cmd_report(settings: Settings, args: argparse.Namespace) -> None:
 
     conn = db.connect(settings.db_path)
     runs = features.load_runs(conn)
+    if runs.empty:
+        raise SystemExit("DBにデータがありません。先に collect か demo を実行してください")
     feat = features.build_features(runs, features.SpeedBaseline().fit(runs[runs["is_future"] == 0]))
     is_demo = conn.execute("SELECT 1 FROM races WHERE source = 'demo' LIMIT 1").fetchone() is not None
     surface = {"ダート": "ダ", "障害": "障"}.get(args.surface, args.surface)

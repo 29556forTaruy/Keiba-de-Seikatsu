@@ -85,7 +85,8 @@ def _write(path: Path, html: str) -> Path:
 
 
 def default_marks(pred: pd.DataFrame, min_ev: float) -> dict[int, str]:
-    """予想勝率の順に ◎○▲△△、それ以外で期待値が高い馬に ☆."""
+    """予想勝率の順に ◎○▲△△、それ以外で期待値が高い馬に ☆ (馬番確定前は印なし)."""
+    pred = pred[pred["number"].notna()]
     order = pred.sort_values("p_win", ascending=False)["number"].astype(int).tolist()
     marks = {}
     for i, num in enumerate(order[:5]):
@@ -135,6 +136,7 @@ def race_context(
             "number": stats._int(r["number"]),
             "frame": stats._int(r["frame"]),
             "horse_id": r["horse_id"],
+            "anchor": f"h{stats._int(r['number'])}" if not _missing(r["number"]) else f"id{r['horse_id']}",
             "horse_name": r["horse_name"],
             "sex": r["sex"],
             "age": stats._int(r["age"]),
@@ -164,11 +166,13 @@ def race_context(
             "spark": sparkline(figs),
         })
 
-    bets = suggest_bets(horses, **betting)
+    numbered = all(h["number"] is not None for h in horses)
+    # 馬番が確定する前 (枠順発表前) は馬券の組番を作れない
+    bets = suggest_bets(horses, **betting) if numbered else []
     probs = [h["p_win"] or 0 for h in horses]
     numbers = [h["number"] for h in horses]
     combos = {}
-    if len(horses) >= 3 and sum(probs) > 0:
+    if numbered and len(horses) >= 3 and sum(probs) > 0:
         combos = {bt: top_combos(probs, numbers, bt, k=5, min_ev=min_ev) for bt in ("馬連", "ワイド", "三連複")}
     return {
         "race": race,
@@ -177,6 +181,7 @@ def race_context(
         "max_p": max([h["p_win"] or 0 for h in horses] + [1e-9]),
         "names": {h["number"]: h["horse_name"] for h in horses},
         "has_odds": any(h["win_odds"] for h in horses),
+        "numbered": numbered,
         "bets": bets,
         "combos": combos,
         "min_ev": min_ev,

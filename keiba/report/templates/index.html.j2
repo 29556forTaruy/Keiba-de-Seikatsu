@@ -19,7 +19,7 @@
       <td><a href="{{ r.href }}">{{ r.race_name or r.race_class }}</a>{% if r.grade %} <span class="badge {{ 'g1' if r.grade == 'G1' else '' }}">{{ r.grade }}</span>{% endif %}</td>
       <td>{{ r.surface }}{{ r.distance }}m</td>
       <td class="num">{{ r.field_size }}</td>
-      <td>{% if r.top %}{{ r.top.number }} {{ r.top.horse_name }}{% endif %}</td>
+      <td>{% if r.top %}{{ r.top.number or "" }} {{ r.top.horse_name }}{% endif %}</td>
       <td class="num">{% if r.top %}{{ r.top.p_win | pct }}{% endif %}</td>
       <td>{% if r.bets %}<span class="good">▲ {{ r.bets }}点 {{ r.stake | yen }}</span>{% else %}<span class="note">見送り</span>{% endif %}</td>
       <td>{% if r.analysis %}{{ r.analysis }}{% endif %}</td>

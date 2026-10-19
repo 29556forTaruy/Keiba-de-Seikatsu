@@ -98,6 +98,10 @@ class Fetcher:
         slug = re.sub(r"[^A-Za-z0-9]+", "_", parsed.path.strip("/"))[-60:] or "index"
         return self.cache_dir / parsed.netloc / f"{slug}_{digest}.html.gz"
 
+    def invalidate(self, url: str) -> None:
+        """パースできなかったページ (開催前の結果ページなど) のキャッシュを消す."""
+        self.cache_path(url).unlink(missing_ok=True)
+
     def _wait(self) -> None:
         elapsed = time.monotonic() - self._last_request
         delay = self.min_interval + random.uniform(0, self.jitter)

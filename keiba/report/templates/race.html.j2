@@ -58,8 +58,8 @@
     <tr>
       <td><span class="mark">{{ h.mark }}</span></td>
       <td><span class="frame f{{ h.frame or 0 }}">{{ h.frame or "-" }}</span></td>
-      <td class="num">{{ h.number }}</td>
-      <td><a href="#h{{ h.number }}">{{ h.horse_name }}</a></td>
+      <td class="num">{{ h.number or "-" }}</td>
+      <td><a href="#{{ h.anchor }}">{{ h.horse_name }}</a></td>
       <td><span class="bar" title="{{ h.p_win | pct }}"><span style="width: {{ (h.p_win or 0) / max_p * 100 }}%"></span></span>{{ h.p_win | pct }}</td>
       <td class="num">{{ h.win_odds | odds }}</td>
       <td class="num">{% if h.ev is not none %}{% if h.ev >= min_ev %}<span class="good">▲ {{ "%.2f"|format(h.ev) }}</span>{% else %}{{ "%.2f"|format(h.ev) }}{% endif %}{% else %}-{% endif %}</td>
@@ -72,6 +72,7 @@
     </tr>
     {% endfor %}
   </table></div>
+  {% if not numbered %}<p class="note">枠順(馬番)が未確定のため、推奨馬券と組み合わせは表示しません。</p>{% endif %}
   {% if not has_odds %}<p class="note">オッズ未取得のため、市場勝率・期待値は空欄です（<code>keiba collect odds {{ race.race_id }}</code>）。</p>{% endif %}
 </section>
 
@@ -104,9 +105,9 @@
 <section class="card">
   <h2>馬柱（近5走）</h2>
   {% for h in horses %}
-  <div class="horse" id="h{{ h.number }}">
+  <div class="horse" id="{{ h.anchor }}">
     <div class="horse-head">
-      <span class="frame f{{ h.frame or 0 }}">{{ h.number }}</span>
+      <span class="frame f{{ h.frame or 0 }}">{{ h.number or "-" }}</span>
       <span class="mark">{{ h.mark }}</span>
       <span class="name">{{ h.horse_name }}</span>
       <span class="note">{{ h.sex }}{{ h.age }} ・ {{ h.weight_carried | num1 }}kg ・ {{ h.jockey_name }}{% if h.trainer_name %} ・ {{ h.trainer_name }}厩舎{% if h.trainer_region %}（{{ h.trainer_region }}）{% endif %}{% endif %}

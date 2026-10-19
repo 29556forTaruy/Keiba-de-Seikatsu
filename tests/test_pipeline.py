@@ -122,3 +122,59 @@ def test_validate_prediction_drops_invalid():
     out = llm_tasks.validate_prediction(data, {1, 2, 3}, budget=1_000)
     assert out["marks"] == [{"number": 1, "mark": "◎", "reason": ""}]
     assert out["bets"] == [{"type": "三連単", "combination": "1-2-3", "amount": 200, "reason": ""}]
+
+
+def _copy_db(demo_db, tmp_path):
+    import shutil
+
+    src, upcoming = demo_db
+    dst = tmp_path / "copy.sqlite"
+    shutil.copy(src, dst)
+    return db.connect(dst), upcoming
+
+
+def _settings(tmp_path):
+    settings = load_settings(db=str(tmp_path / "unused.sqlite"))
+    settings.raw["paths"]["reports"] = str(tmp_path / "reports")
+    return settings
+
+
+@pytest.mark.parametrize("use_model", [True, False])
+def test_reports_without_odds(trained, demo_db, tmp_path, use_model):
+    """オッズ未発売 (odds テーブルが空) でもレポートが作れる."""
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    conn.execute("DELETE FROM odds")
+    conn.commit()
+    ids = pipeline.upcoming_race_ids(conn, upcoming.isoformat())
+    pages = pipeline.build_reports(conn, _settings(tmp_path), ids, bundle=bundle if use_model else None,
+                                   progress=lambda *_: None)
+    assert len(pages) == len(ids) + 1
+    assert "オッズ未取得" in pages[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("use_model", [True, False])
+def test_reports_before_draw(trained, demo_db, tmp_path, use_model):
+    """枠順発表前 (馬番が空) の出馬表でもレポートが作れる."""
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    ids = pipeline.upcoming_race_ids(conn, upcoming.isoformat())
+    conn.execute("UPDATE entries SET number = NULL, frame = NULL WHERE race_id = ?", (ids[0],))
+    conn.commit()
+    pages = pipeline.build_reports(conn, _settings(tmp_path), ids[:1], bundle=bundle if use_model else None,
+                                   progress=lambda *_: None)
+    html = pages[0].read_text(encoding="utf-8")
+    assert "枠順(馬番)が未確定" in html
+    assert ">None<" not in html
+
+
+def test_last_popularity_uses_previous_field(demo_db):
+    path, _ = demo_db
+    conn = db.connect(path)
+    runs = features.load_runs(conn)
+    feat = features.build_features(runs, features.SpeedBaseline().fit(runs[runs["is_future"] == 0]))
+    h = feat.groupby("horse_id", sort=False)
+    expected = h["popularity"].shift() / h["field_size"].shift()
+    ok = expected.notna()
+    assert ok.any()
+    assert (feat.loc[ok, "h_last_pop"] - expected[ok]).abs().max() < 1e-9

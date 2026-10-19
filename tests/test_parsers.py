@@ -124,3 +124,16 @@ def test_lists():
 def test_parse_error_on_empty_page():
     with pytest.raises(parsers.ParseError):
         parsers.parse_race_result("<html><body>no data</body></html>", "202405040911")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("芝左2000m / 天候 : 晴 / 芝 : 良", ("芝", "左", None, 2000)),
+    ("芝右 外1600m", ("芝", "右", "外", 1600)),
+    ("芝右 内2周3600m", ("芝", "右", "内2周", 3600)),
+    ("障芝 外-内4250m", ("障", None, "外-内", 4250)),
+    ("ダ右1800m", ("ダ", "右", None, 1800)),
+    ("芝直線1000m", ("芝", "直線", None, 1000)),
+])
+def test_parse_course_variants(text, expected):
+    c = parsers.parse_course(text)
+    assert (c["surface"], c["direction"], c["course_detail"], c["distance"]) == expected

@@ -102,17 +102,22 @@ def id_from_href(href: str | None, kind: str) -> str | None:
 
 
 def parse_course(text: str) -> dict[str, Any]:
-    """'芝左2000m' / 'ダ右1800m' / '芝右 外1600m' / '障芝3000m' を分解する."""
+    """'芝左2000m' / 'ダ右1800m' / '芝右 外1600m' / '障芝3000m' / '芝右 内2周3600m' / '障芝 外-内4250m' を分解する."""
     text = norm(text)
     out: dict[str, Any] = {"surface": None, "direction": None, "distance": None, "course_detail": None}
-    m = re.search(r"(障|芝|ダ)\S*?\s*(右|左|直線|直)?\s*(外内|内外|外|内|2周)?\s*(\d{3,4})\s*m", text)
-    if not m:
+    head = text.split("/")[0]
+    surface = re.search(r"(障|芝|ダ)", head)
+    distance = re.search(r"(\d{3,4})\s*m", head)
+    if not surface or not distance:
         return out
-    out["surface"] = m.group(1)
-    if m.group(2):
-        out["direction"] = "直線" if m.group(2).startswith("直") else m.group(2)
-    out["course_detail"] = m.group(3)
-    out["distance"] = int(m.group(4))
+    out["surface"] = surface.group(1)
+    out["distance"] = int(distance.group(1))
+    between = head[surface.end():distance.start()]
+    direction = re.search(r"(右|左|直線|直)", between)
+    if direction:
+        out["direction"] = "直線" if direction.group(1).startswith("直") else direction.group(1)
+    detail = re.search(r"(外-内|内-外|外内|内外|内2周|外2周|2周|外|内)", between)
+    out["course_detail"] = detail.group(1) if detail else None
     return out
 
 

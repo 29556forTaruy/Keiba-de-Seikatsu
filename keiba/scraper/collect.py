@@ -15,6 +15,16 @@ log = logging.getLogger(__name__)
 Progress = Callable[[str], None]
 
 
+def _parse(fetcher: Fetcher, url: str, parse, *args, live: bool = False, refresh: bool = False, **kwargs):
+    """取得してパース。パースに失敗したらキャッシュを捨てて、次回は取り直す."""
+    html = fetcher.get(url, live=live, refresh=refresh)
+    try:
+        return parse(html, *args, **kwargs)
+    except parsers.ParseError:
+        fetcher.invalidate(url)
+        raise
+
+
 def _months(start: date, end: date) -> Iterable[tuple[int, int]]:
     y, m = start.year, start.month
     while (y, m) <= (end.year, end.month):
@@ -26,7 +36,7 @@ def kaisai_dates(fetcher: Fetcher, start: date, end: date) -> list[date]:
     """期間内の開催日 (カレンダーページから)."""
     out: list[date] = []
     for y, m in _months(start, end):
-        html = fetcher.get(urls.calendar(y, m), live=(y, m) == (date.today().year, date.today().month))
+        html = fetcher.get(urls.calendar(y, m), live=(y, m) >= (date.today().year, date.today().month))
         found = [date(int(s[:4]), int(s[4:6]), int(s[6:])) for s in parsers.extract_kaisai_dates(html)]
         if not found:
             # カレンダーが読めなければ土日を総当たりする
@@ -53,7 +63,7 @@ def collect_race(conn: sqlite3.Connection, fetcher: Fetcher, race_id: str, *, re
     """確定成績1レース分を保存する。保存できたら True."""
     if not refresh and db.has_results(conn, race_id):
         return False
-    parsed = parsers.parse_race_result(fetcher.get(urls.race_result(race_id), refresh=refresh), race_id)
+    parsed = _parse(fetcher, urls.race_result(race_id), parsers.parse_race_result, race_id, refresh=refresh)
     db.save_race(conn, parsed["race"])
     db.save_results(conn, race_id, parsed["results"])
     db.save_payouts(conn, race_id, parsed["payouts"])
@@ -91,7 +101,7 @@ def collect_results(
 
 def collect_card(conn: sqlite3.Connection, fetcher: Fetcher, race_id: str, *, race_date: str | None = None) -> dict:
     """出馬表を保存する."""
-    parsed = parsers.parse_shutuba(fetcher.get(urls.shutuba(race_id), live=True), race_id, date=race_date)
+    parsed = _parse(fetcher, urls.shutuba(race_id), parsers.parse_shutuba, race_id, date=race_date, live=True)
     existing = db.get_race(conn, race_id)
     race = parsed["race"]
     if existing and existing.get("source") != "netkeiba":
@@ -118,7 +128,7 @@ def collect_cards_for_date(
 
 
 def collect_odds(conn: sqlite3.Connection, fetcher: Fetcher, race_id: str) -> dict:
-    parsed = parsers.parse_odds_json(fetcher.get(urls.odds_api(race_id), live=True), race_id)
+    parsed = _parse(fetcher, urls.odds_api(race_id), parsers.parse_odds_json, race_id, live=True)
     rows = [r for r in parsed["odds"] if r["win_odds"] is not None]
     if rows:
         db.save_odds(conn, race_id, rows)
@@ -138,7 +148,7 @@ def collect_pedigrees(
     saved = 0
     for i, horse_id in enumerate(ids, 1):
         try:
-            db.save_horse(conn, parsers.parse_pedigree(fetcher.get(urls.pedigree(horse_id)), horse_id))
+            db.save_horse(conn, _parse(fetcher, urls.pedigree(horse_id), parsers.parse_pedigree, horse_id))
             saved += 1
         except (FetchError, parsers.ParseError) as exc:
             progress(f"  {horse_id}: 血統スキップ ({exc})")

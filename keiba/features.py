@@ -31,6 +31,18 @@ RACE_JOIN = """
 """
 
 
+# 成績・オッズ由来で、データによっては存在しない列
+OPTIONAL_COLS = [
+    "finish_pos", "finish_status", "time_sec", "margin", "passing", "last3f", "odds", "win_odds",
+    "popularity", "place_odds_min", "place_odds_max", "prize", "horse_weight", "weight_diff",
+]
+NUMERIC_COLS = [
+    "finish_pos", "time_sec", "last3f", "odds", "win_odds", "popularity", "place_odds_min", "place_odds_max",
+    "prize", "horse_weight", "weight_diff", "weight_carried", "frame", "number", "age", "distance",
+    "class_level", "field_size", "race_num",
+]
+
+
 def load_runs(conn: sqlite3.Connection) -> pd.DataFrame:
     """確定成績と出馬表(未確定レース)をまとめて読み込む."""
     past = db.read_df(conn, f"""
@@ -50,11 +62,16 @@ def load_runs(conn: sqlite3.Connection) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True, sort=False)
+    # 成績がまだ無いDBやオッズ未発売のレースでも列がそろうようにし、NULLだけの列も数値型にする
+    for col in OPTIONAL_COLS:
+        if col not in df:
+            df[col] = np.nan
+    for col in NUMERIC_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["finish_status"] = df["finish_status"].astype("object").where(df["finish_status"].notna(), None)
     sires = db.read_df(conn, "SELECT horse_id, sire, sire_id, damsire, damsire_id FROM horses")
     df = df.merge(sires, on="horse_id", how="left")
     df["date"] = pd.to_datetime(df["date"])
-    if "finish_status" not in df:
-        df["finish_status"] = None
     # 取消・除外は走っていないので除く
     df = df[~df["finish_status"].isin(["取消", "除外"])].copy()
     # 未確定レースの頭数は出走予定頭数
@@ -212,7 +229,7 @@ def build_features(df: pd.DataFrame, baseline: SpeedBaseline) -> pd.DataFrame:
     df["h_top3_rate"] = (top3_before + 0.25 * 3) / (runs + 3)
     df["h_dist_change"] = df["distance"] - h["distance"].shift()
     df["h_class_change"] = df["class_level"] - h["class_level"].shift()
-    df["h_last_pop"] = h["popularity"].shift() / field
+    df["h_last_pop"] = h["popularity"].shift() / h["field_size"].shift().clip(lower=2)
     df["h_prize_log"] = np.log1p(_exclusive_cumsum(df, "horse_id", "prize").clip(lower=0))
     for name, keys in (("surf", ["horse_id", "surface"]), ("band", ["horse_id", "band"]),
                        ("venue", ["horse_id", "venue"])):
