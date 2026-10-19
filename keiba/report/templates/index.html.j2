@@ -21,7 +21,7 @@
       <td class="num">{{ r.field_size }}</td>
       <td>{% if r.top %}{{ r.top.number or "" }} {{ r.top.horse_name }}{% endif %}</td>
       <td class="num">{% if r.top %}{{ r.top.p_win | pct }}{% endif %}</td>
-      <td>{% if r.bets %}<span class="good">▲ {{ r.bets }}点 {{ r.stake | yen }}</span>{% else %}<span class="note">見送り</span>{% endif %}</td>
+      <td>{% if r.bets %}<span class="good">▲ {{ r.bets }}点 {{ r.stake | yen }}</span>{% elif not r.numbered %}<span class="note">枠順未確定</span>{% elif not r.has_odds %}<span class="note">オッズ未取得</span>{% else %}<span class="note">見送り</span>{% endif %}</td>
       <td>{% if r.analysis %}{{ r.analysis }}{% endif %}</td>
     </tr>
     {% endfor %}
