@@ -18,7 +18,10 @@ class OpenAIWorker:
             raise WorkerError("openai が未インストールです: pip install -e '.[openai]'") from exc
         self._openai = openai
         # OPENAI_API_KEY を使う
-        self.client = openai.OpenAI()
+        try:
+            self.client = openai.OpenAI()
+        except openai.OpenAIError as exc:
+            raise WorkerError(f"OpenAI APIを使えません。OPENAI_API_KEY を確認してください ({exc})") from exc
         self.model = cfg.get("model", "gpt-5")
 
     def run(

@@ -148,7 +148,8 @@ CREATE TABLE IF NOT EXISTS analyses (
     role       TEXT NOT NULL,
     worker     TEXT,
     content    TEXT,
-    created_at TEXT
+    created_at TEXT,
+    ref_id     INTEGER  -- review のとき、点検した predict の id
 );
 
 CREATE TABLE IF NOT EXISTS predictions (
@@ -198,7 +199,16 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """古いDBに後から足した列を追加する."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()}
+    if "ref_id" not in cols:
+        conn.execute("ALTER TABLE analyses ADD COLUMN ref_id INTEGER")
+        conn.commit()
 
 
 def _upsert(
@@ -261,19 +271,19 @@ def save_news(
     )
 
 
-def save_analysis(conn: sqlite3.Connection, race_id: str, role: str, worker: str, content: Any) -> None:
-    """content は dict (JSON保存) か文字列."""
+def save_analysis(
+    conn: sqlite3.Connection, race_id: str, role: str, worker: str, content: Any, *, ref_id: int | None = None
+) -> int:
+    """content は dict (JSON保存) か文字列. ref_id は review が点検した predict の id. 保存した行の id を返す."""
     text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-    conn.execute(
-        "INSERT INTO analyses (race_id, role, worker, content, created_at) VALUES (?, ?, ?, ?, ?)",
-        (race_id, role, worker, text, now_iso()),
+    cur = conn.execute(
+        "INSERT INTO analyses (race_id, role, worker, content, created_at, ref_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (race_id, role, worker, text, now_iso(), ref_id),
     )
+    return int(cur.lastrowid)
 
 
-def latest_analysis(conn: sqlite3.Connection, race_id: str, role: str) -> dict[str, Any] | None:
-    row = conn.execute(
-        "SELECT * FROM analyses WHERE race_id = ? AND role = ? ORDER BY id DESC LIMIT 1", (race_id, role)
-    ).fetchone()
+def _analysis_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     d = dict(row)
@@ -282,6 +292,25 @@ def latest_analysis(conn: sqlite3.Connection, race_id: str, role: str) -> dict[s
     except (TypeError, json.JSONDecodeError):
         pass
     return d
+
+
+def latest_analysis(conn: sqlite3.Connection, race_id: str, role: str) -> dict[str, Any] | None:
+    return _analysis_dict(conn.execute(
+        "SELECT * FROM analyses WHERE race_id = ? AND role = ? ORDER BY id DESC LIMIT 1", (race_id, role)
+    ).fetchone())
+
+
+def review_for(conn: sqlite3.Connection, race_id: str, analysis_id: int) -> dict[str, Any] | None:
+    """指定の AI予想 (predict) を点検したセカンドオピニオン.
+
+    ref_id のない古い行は、その予想より後に書かれたものだけを対象にする。
+    """
+    return _analysis_dict(conn.execute(
+        """SELECT * FROM analyses WHERE race_id = ? AND role = 'review'
+             AND (ref_id = ? OR (ref_id IS NULL AND id > ?))
+           ORDER BY id DESC LIMIT 1""",
+        (race_id, analysis_id, analysis_id),
+    ).fetchone())
 
 
 def save_predictions(conn: sqlite3.Connection, rows: list[Mapping[str, Any]]) -> int:

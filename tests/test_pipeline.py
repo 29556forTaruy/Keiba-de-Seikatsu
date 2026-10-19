@@ -1,5 +1,7 @@
 """架空データで 学習 → バックテスト → レポート(LLM作業者はダミー) を通す."""
 
+import dataclasses
+import json
 import re
 from datetime import timedelta
 
@@ -7,7 +9,7 @@ import pytest
 
 from keiba import backtest, db, features, model, pipeline
 from keiba.config import load_settings
-from keiba.llm import WorkerResult
+from keiba.llm import WorkerError, WorkerResult
 from keiba.llm import tasks as llm_tasks
 
 # 中国語フォント (簡体・繁体) の名前。レポートに含めてはいけない
@@ -133,9 +135,10 @@ def _copy_db(demo_db, tmp_path):
     return db.connect(dst), upcoming
 
 
-def _settings(tmp_path):
-    settings = load_settings(db=str(tmp_path / "unused.sqlite"))
+def _settings(tmp_path, db_name="unused.sqlite"):
+    settings = load_settings(db=str(tmp_path / db_name))
     settings.raw["paths"]["reports"] = str(tmp_path / "reports")
+    settings.raw["paths"]["models"] = str(tmp_path / "models")
     return settings
 
 
@@ -178,3 +181,263 @@ def test_last_popularity_uses_previous_field(demo_db):
     ok = expected.notna()
     assert ok.any()
     assert (feat.loc[ok, "h_last_pop"] - expected[ok]).abs().max() < 1e-9
+
+
+# ---------------------------------------------------------------- 成績未取得の過去の出馬表
+
+def _unsettle(conn, upcoming, n_days):
+    """直前 n_days 開催日のレースを「keiba day で出馬表だけ取り、成績は取り込んでいない」状態にする."""
+    days = [r[0] for r in conn.execute(
+        "SELECT DISTINCT date FROM races WHERE date < ? ORDER BY date DESC LIMIT ?", (upcoming.isoformat(), n_days))]
+    ids = [r[0] for r in conn.execute(
+        f"SELECT race_id FROM races WHERE date IN ({','.join('?' * len(days))}) ORDER BY date, race_id", days)]
+    marks = ",".join("?" * len(ids))
+    conn.execute(f"""
+        INSERT OR REPLACE INTO entries (race_id, horse_id, horse_name, frame, number, sex, age, weight_carried,
+            jockey_id, jockey_name, trainer_id, trainer_name, trainer_region, horse_weight, weight_diff, scratched)
+        SELECT race_id, horse_id, horse_name, frame, number, sex, age, weight_carried, jockey_id, jockey_name,
+            trainer_id, trainer_name, trainer_region, horse_weight, weight_diff,
+            CASE WHEN finish_status IN ('取消', '除外') THEN 1 ELSE 0 END
+        FROM results WHERE race_id IN ({marks})""", ids)
+    conn.execute(f"DELETE FROM results WHERE race_id IN ({marks})", ids)
+    conn.execute(f"DELETE FROM payouts WHERE race_id IN ({marks})", ids)
+    conn.commit()
+    return ids
+
+
+def _blank_last_run(feat, race_ids):
+    t = feat[feat["race_id"].isin(race_ids)]
+    return int((t["h_last_fin"].isna() & (t["h_n_runs"] > 0)).sum())
+
+
+def test_unsettled_past_cards_do_not_blank_last_run(demo_db, tmp_path):
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    _unsettle(conn, upcoming, 8)
+    targets = pipeline.upcoming_race_ids(conn, upcoming.isoformat())
+    runs = features.load_runs(conn)
+    baseline = features.SpeedBaseline().fit(runs[runs["is_future"] == 0])
+    # 直さないと、前走が「着順なしの1走」になって近走の特徴量が欠ける (学習時には無い組み合わせ)
+    assert _blank_last_run(features.build_features(runs, baseline), targets) > 0
+
+    msgs = []
+    kept = pipeline._drop_stale_cards(runs, targets, msgs.append)
+    assert set(kept.loc[kept["is_future"] == 1, "race_id"]) == set(targets)
+    assert any("成績が未取得の過去レース" in m and "keiba collect results" in m for m in msgs)
+    assert _blank_last_run(features.build_features(kept, baseline), targets) == 0
+
+
+def test_run_day_collects_unsettled_results_and_falls_back_on_fetch_error(demo_db, tmp_path, monkeypatch):
+    from keiba.scraper import collect, http
+
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    stale = _unsettle(conn, upcoming, 1)
+    marks = ",".join("?" * len(stale))
+    conn.execute(f"UPDATE races SET source = 'netkeiba' WHERE race_id IN ({marks})", stale)
+    conn.commit()
+    assert pipeline.unsettled_race_ids(conn, upcoming.isoformat()) == stale
+
+    calls = {"race": [], "odds": [], "pedigree": 0}
+    monkeypatch.setattr(http.Fetcher, "from_settings", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(collect, "collect_cards_for_date", lambda *a, **k: [])
+    monkeypatch.setattr(collect, "collect_race", lambda conn, f, rid, **k: calls["race"].append(rid))
+
+    def blocked(conn, f, rid):
+        calls["odds"].append(rid)
+        raise http.FetchError("HTTP 403: アクセスが拒否されました")
+
+    monkeypatch.setattr(collect, "collect_odds", blocked)
+    monkeypatch.setattr(collect, "collect_pedigrees", lambda *a, **k: calls.__setitem__("pedigree", 1))
+    msgs = []
+    pages = pipeline.run_day(conn, _settings(tmp_path), upcoming, progress=msgs.append)
+    assert calls["race"] == stale, "前の開催日の成績を先に取り込む"
+    # 取得エラーが続いたら以降の通信はせず、DBにある分だけでレポートを作る
+    assert len(calls["odds"]) == pipeline.MAX_FETCH_FAILURES and calls["pedigree"] == 0
+    assert any("DBにあるデータだけ" in m for m in msgs)
+    assert any(p.name == "index.html" for p in pages)
+
+
+def test_run_day_falls_back_when_race_list_fails(demo_db, tmp_path, monkeypatch):
+    from keiba.scraper import collect, http
+
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    monkeypatch.setattr(http.Fetcher, "from_settings", staticmethod(lambda *a, **k: None))
+
+    def down(*a, **k):
+        raise http.FetchError("取得に失敗しました: race_list_sub")
+
+    monkeypatch.setattr(collect, "collect_cards_for_date", down)
+    msgs = []
+    pages = pipeline.run_day(conn, _settings(tmp_path), upcoming, progress=msgs.append)
+    assert any("DBにあるデータだけ" in m for m in msgs)
+    assert len(pages) == len(pipeline.upcoming_race_ids(conn, upcoming.isoformat())) + 1
+
+
+# ---------------------------------------------------------------- モデルの置き場所
+
+def test_models_are_scoped_per_db(trained, tmp_path):
+    _, _, bundle, _, _ = trained
+    bundle = dataclasses.replace(bundle, metrics=dict(bundle.metrics))
+    demo = _settings(tmp_path, "demo.sqlite")
+    path = pipeline.save_model(demo, bundle)
+    assert path.parent == tmp_path / "models" / "demo"
+    assert pipeline.latest_model_path(demo) == path
+    assert pipeline.load_model(demo).metrics["db"] == str((tmp_path / "demo.sqlite").resolve())
+    # 別のDBでは、デモDBで学習したモデルを使わない (市場の勝率だけになる)
+    real = _settings(tmp_path, "keiba.sqlite")
+    assert pipeline.latest_model_path(real) is None
+    assert pipeline.load_model(real, progress=lambda *_: None) is None
+    # 以前の版で models/ 直下に保存したモデルは使わず、そのことを知らせる
+    (tmp_path / "models" / "old.joblib").write_bytes(b"")
+    msgs = []
+    assert pipeline.load_model(real, progress=msgs.append) is None
+    assert any("直下の古いモデルは使いません" in m for m in msgs)
+    # 名前だけでも、そのDBのモデル置き場から探せる
+    assert pipeline.load_model(demo, bundle.version).version == bundle.version
+
+
+def test_explicit_missing_model_is_an_error(tmp_path):
+    with pytest.raises(FileNotFoundError, match="モデルファイルが見つかりません"):
+        pipeline.load_model(_settings(tmp_path), tmp_path / "models" / "v2025.joblb")
+
+
+# ---------------------------------------------------------------- AI作業者の失敗
+
+class BrokenWorker:
+    def __init__(self, name, exc):
+        self.name, self.exc, self.calls = name, exc, 0
+
+    def run(self, prompt, **kwargs):
+        self.calls += 1
+        raise self.exc
+
+
+def _capture_contexts(monkeypatch):
+    seen = {}
+    original = pipeline.render.render_race
+
+    def spy(ctx, path):
+        seen[ctx["race"]["race_id"]] = ctx
+        return original(ctx, path)
+
+    monkeypatch.setattr(pipeline.render, "render_race", spy)
+    return seen
+
+
+def test_news_failure_does_not_skip_prediction(trained, demo_db, tmp_path, monkeypatch):
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    settings = _settings(tmp_path)
+    settings.raw["workers"] = {"news": "bad_news", "predict": "good", "review": ""}
+    workers = {"bad_news": BrokenWorker("bad_news", WorkerError("quota")), "good": FakeWorker("good")}
+    monkeypatch.setattr(pipeline, "make_worker", lambda name, _s: workers[name])
+    ids = pipeline.upcoming_race_ids(conn, upcoming.isoformat())[:2]
+    msgs = []
+    pipeline.build_reports(conn, settings, ids, bundle=bundle, roles={"news", "predict"}, llm_filter="all",
+                           progress=msgs.append)
+    assert workers["bad_news"].calls == 2
+    assert len(workers["good"].calls) == 2, "直前情報が失敗しても予想は作る"
+    assert db.latest_analysis(conn, ids[0], "predict")["worker"] == "good"
+
+
+@pytest.mark.parametrize("failure", ["run", "init"])
+def test_unexpected_worker_errors_keep_pages_and_mark_stale(trained, demo_db, tmp_path, monkeypatch, failure):
+    """APIキー未設定 (SDKの TypeError) や初期化失敗でも、全レースのページと一覧を作る."""
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    ids = pipeline.upcoming_race_ids(conn, upcoming.isoformat())
+    db.save_analysis(conn, ids[0], "predict", "old", {"summary": "前回の見解", "marks": [], "bets": []})
+    conn.commit()
+    settings = _settings(tmp_path)
+    settings.raw["workers"] = {"news": "", "predict": "p", "review": ""}
+    broken = BrokenWorker("p", TypeError("Could not resolve authentication method"))
+    built = []
+
+    def make(name, _s):
+        built.append(name)
+        if failure == "init":
+            raise RuntimeError("SDKの初期化に失敗")
+        return broken
+
+    monkeypatch.setattr(pipeline, "make_worker", make)
+    seen = _capture_contexts(monkeypatch)
+    msgs = []
+    pages = pipeline.build_reports(conn, settings, ids, bundle=bundle, roles={"predict"}, llm_filter="all",
+                                   progress=msgs.append)
+    assert len(pages) == len(ids) + 1 and pages[-1].name == "index.html"
+    assert built == ["p"], "作れなかった作業者を毎レース作り直さない"
+    if failure == "run":
+        assert broken.calls == len(ids)
+        assert any("作業者エラー" in m and "TypeError" in m for m in msgs)
+    # 今回の予想に失敗したので、前回の予想は古いものとして渡す
+    assert seen[ids[0]]["analysis"]["stale"] is True
+    assert seen[ids[0]]["analysis"]["created_at"]
+
+
+def test_review_is_shown_only_with_the_prediction_it_reviewed(trained, demo_db, tmp_path, monkeypatch):
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    settings = _settings(tmp_path)
+    settings.raw["workers"] = {"news": "", "predict": "p", "review": "r"}
+    workers = {"p": FakeWorker("p"), "r": FakeWorker("r")}
+    monkeypatch.setattr(pipeline, "make_worker", lambda name, _s: workers[name])
+    seen = _capture_contexts(monkeypatch)
+    rid = pipeline.upcoming_race_ids(conn, upcoming.isoformat())[0]
+    run = lambda roles: pipeline.build_reports(conn, settings, [rid], bundle=bundle, roles=roles,  # noqa: E731
+                                               llm_filter="all", progress=lambda *_: None)
+    run({"predict", "review"})
+    first = seen[rid]["analysis"]
+    assert seen[rid]["review"]["ref_id"] == first["id"]
+    assert "stale" not in first
+    run({"predict"})  # 予想だけ作り直した: 古い予想への点検は出さない
+    assert seen[rid]["analysis"]["id"] > first["id"]
+    assert seen[rid]["review"] is None
+    run(set())  # AIを使わない再実行でも同じ
+    assert seen[rid]["review"] is None
+
+
+def test_review_for_legacy_rows(tmp_path):
+    conn = db.connect(tmp_path / "x.sqlite")
+    a1 = db.save_analysis(conn, "R1", "predict", "w", {"summary": "1"})
+    conn.execute("INSERT INTO analyses (race_id, role, worker, content) VALUES ('R1', 'review', 'w', '古い点検')")
+    a2 = db.save_analysis(conn, "R1", "predict", "w", {"summary": "2"})
+    assert db.review_for(conn, "R1", a1)["content"] == "古い点検"
+    assert db.review_for(conn, "R1", a2) is None
+    r = db.save_analysis(conn, "R1", "review", "w", "新しい点検", ref_id=a2)
+    assert db.review_for(conn, "R1", a2)["id"] == r
+
+
+def test_old_db_gets_ref_id_column(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE analyses (id INTEGER PRIMARY KEY AUTOINCREMENT, race_id TEXT NOT NULL, "
+                "role TEXT NOT NULL, worker TEXT, content TEXT, created_at TEXT)")
+    old.commit()
+    old.close()
+    conn = db.connect(path)
+    assert "ref_id" in {r[1] for r in conn.execute("PRAGMA table_info(analyses)")}
+
+
+# ---------------------------------------------------------------- 日付の一覧
+
+def test_single_race_run_keeps_the_day_index(trained, demo_db, tmp_path):
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    settings = _settings(tmp_path)
+    ids = pipeline.upcoming_race_ids(conn, upcoming.isoformat())
+    pipeline.build_reports(conn, settings, ids, bundle=bundle, progress=lambda *_: None)
+    pages = pipeline.build_reports(conn, settings, ids[:1], bundle=bundle, progress=lambda *_: None)
+    index = pages[-1]
+    assert index.name == "index.html"
+    html = index.read_text(encoding="utf-8")
+    assert all(f'href="{rid}.html"' in html for rid in ids), "1レースだけ作り直しても一覧は減らない"
+    assert f"{len(ids)}レース" in html
+    summary = json.loads((index.parent / f"{ids[0]}.summary.json").read_text(encoding="utf-8"))
+    assert set(summary["top"]) == set(pipeline.INDEX_TOP_KEYS)
+    assert summary["is_demo"] is True
+    # ページを消したレースは一覧から外す
+    (index.parent / f"{ids[1]}.html").unlink()
+    html = pipeline.build_reports(conn, settings, ids[:1], bundle=bundle, progress=lambda *_: None)[-1].read_text(
+        encoding="utf-8")
+    assert f'href="{ids[1]}.html"' not in html and f"{len(ids) - 1}レース" in html

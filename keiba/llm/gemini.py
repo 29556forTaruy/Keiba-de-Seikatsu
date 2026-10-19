@@ -8,6 +8,20 @@ from typing import Any
 from keiba.llm.base import WorkerError, WorkerResult, dedupe_sources
 
 
+def _network_errors() -> tuple[type[Exception], ...]:
+    """google-genai の通信エラーの型 (httpx と、その互換フォーク httpx2). APIError にならないので別に捕まえる."""
+    import httpx
+
+    errs: list[type[Exception]] = [httpx.HTTPError]
+    try:
+        import httpx2
+
+        errs.append(httpx2.HTTPError)
+    except (ImportError, AttributeError):
+        pass
+    return tuple(errs)
+
+
 class GeminiWorker:
     name = "gemini_api"
 
@@ -17,7 +31,10 @@ class GeminiWorker:
         except ImportError as exc:
             raise WorkerError("google-genai が未インストールです: pip install -e '.[gemini]'") from exc
         # GEMINI_API_KEY (または GOOGLE_API_KEY) を使う
-        self.client = genai.Client()
+        try:
+            self.client = genai.Client()
+        except ValueError as exc:  # APIキーが無い
+            raise WorkerError(f"Gemini APIを使えません。GEMINI_API_KEY を確認してください ({exc})") from exc
         self.model = cfg.get("model", "gemini-flash-latest")
 
     def run(
@@ -40,6 +57,8 @@ class GeminiWorker:
             resp = self.client.models.generate_content(model=self.model, contents=prompt, config=config)
         except errors.APIError as exc:
             raise WorkerError(f"Gemini APIエラー: {exc}") from exc
+        except _network_errors() as exc:  # 接続できない・応答がないなど
+            raise WorkerError(f"Gemini APIに接続できません。ネットワークを確認してください: {exc}") from exc
         text = (resp.text or "").strip()
         sources = []
         for cand in resp.candidates or []:

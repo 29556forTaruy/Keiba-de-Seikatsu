@@ -51,19 +51,22 @@ class ClaudeWorker:
                 "user_location": {"type": "approximate", "country": "JP", "timezone": "Asia/Tokyo"},
             }]
 
+        # max_tokens が大きいと SDK は非ストリーミングの呼び出しを拒否する (10分を超えうるため) ので、
+        # ストリーミングで受けて最後のメッセージだけ使う
         if self.fallbacks:
             # 安全分類器に断られたとき、サーバー側で推奨モデルに再実行させる
-            create = self.client.beta.messages.create
+            stream = self.client.beta.messages.stream
             params["betas"] = ["server-side-fallback-2026-07-01"]
             params["fallbacks"] = "default"
         else:
-            create = self.client.messages.create
+            stream = self.client.messages.stream
 
         texts: list[str] = []
         sources: list[dict[str, str]] = []
         try:
             for _ in range(MAX_CONTINUATIONS):
-                resp = create(**params)
+                with stream(**params) as s:
+                    resp = s.get_final_message()
                 for block in resp.content:
                     if block.type == "text":
                         texts.append(block.text)
@@ -86,6 +89,14 @@ class ClaudeWorker:
             raise WorkerError(f"Claude APIエラー ({exc.status_code}): {exc.message}") from exc
         except anthropic.APIConnectionError as exc:
             raise WorkerError("Claude APIに接続できません。ネットワークを確認してください") from exc
+        except anthropic.APIError as exc:
+            raise WorkerError(f"Claude APIエラー: {exc}") from exc
+        except TypeError as exc:
+            # APIキーもログイン情報もないと、SDK は送信前に TypeError を出す
+            raise WorkerError("Claude APIの認証情報がありません。ANTHROPIC_API_KEY を設定するか "
+                              f"ant auth login でログインしてください ({exc})") from exc
+        except ValueError as exc:
+            raise WorkerError(f"Claude APIの呼び出し設定が正しくありません: {exc}") from exc
 
         if resp.stop_reason == "refusal":
             raise WorkerError("Claudeが応答を辞退しました (refusal)")

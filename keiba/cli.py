@@ -19,6 +19,7 @@ from pathlib import Path
 
 from keiba import __version__, db
 from keiba.config import Settings, load_settings
+from keiba.scraper.http import FetchError
 
 
 def _date(s: str) -> date:
@@ -62,7 +63,7 @@ def cmd_init(settings: Settings, args: argparse.Namespace) -> None:
 
 
 def cmd_status(settings: Settings, args: argparse.Namespace) -> None:
-    from keiba.pipeline import latest_model_path
+    from keiba.pipeline import latest_model_path, models_dir
 
     conn = db.connect(settings.db_path)
     q = lambda sql: conn.execute(sql).fetchone()  # noqa: E731
@@ -78,7 +79,7 @@ def cmd_status(settings: Settings, args: argparse.Namespace) -> None:
     for d, n in upcoming[-5:]:
         print(f"  未確定: {d} {n}レース")
     path = latest_model_path(settings)
-    print(f"  最新モデル: {path if path else 'なし (keiba train で作成)'}")
+    print(f"  最新モデル: {path if path else f'なし (keiba train で {models_dir(settings)} に作成)'}")
 
 
 def cmd_demo(settings: Settings, args: argparse.Namespace) -> None:
@@ -202,18 +203,24 @@ def cmd_predict(settings: Settings, args: argparse.Namespace) -> None:
     from keiba.pipeline import build_reports, load_model
 
     conn = db.connect(settings.db_path)
+    bundle = load_model(settings, args.model)  # --model の指定ミスは収集の前に知らせる
     if args.collect:
         from keiba.scraper import collect
 
         fetcher = _fetcher(settings, args)
-        for race_id in args.race_ids:
-            if not db.has_results(conn, race_id):
-                collect.collect_card(conn, fetcher, race_id)
-                try:
-                    collect.collect_odds(conn, fetcher, race_id)
-                except Exception as exc:
-                    print(f"{race_id}: オッズ取得スキップ ({exc})")
-    pages = build_reports(conn, settings, args.race_ids, bundle=load_model(settings, args.model),
+        try:
+            for race_id in args.race_ids:
+                if not db.has_results(conn, race_id):
+                    collect.collect_card(conn, fetcher, race_id)
+                    try:
+                        collect.collect_odds(conn, fetcher, race_id)
+                    except FetchError:
+                        raise
+                    except Exception as exc:
+                        print(f"{race_id}: オッズ取得スキップ ({exc})")
+        except FetchError as exc:  # アクセス拒否・通信断. DBにある分だけで作る
+            print(f"注意: 取得に失敗したので、DBにあるデータだけでレポートを作ります ({exc})")
+    pages = build_reports(conn, settings, args.race_ids, bundle=bundle,
                           roles=_roles(args), llm_filter="all", budget=args.budget)
     _print_pages(pages)
 
@@ -348,6 +355,12 @@ def main(argv: list[str] | None = None) -> None:
         args.func(settings, args)
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"エラー: {exc}") from None
+    except FetchError as exc:  # アクセス拒否・通信断 (http.py が利用者向けの説明を書いている)
+        raise SystemExit(
+            f"エラー: {exc}\n"
+            "通信できないときは、day は --offline、collect は --offline (キャッシュだけ使う)、"
+            "predict は --collect なしで、DBにあるデータだけで実行できます"
+        ) from None
 
 
 if __name__ == "__main__":
