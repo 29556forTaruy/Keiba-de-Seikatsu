@@ -47,9 +47,14 @@ model = "gemini-flash-latest"
 [openai]
 model = "gpt-5"
 
-# CLIのコマンド。{prompt} がプロンプトに置き換わる。
+# CLIのコマンド。プロンプトは標準入力で渡す。
+# "{prompt}" を書くとその位置に引数で渡すが、Windows ではコマンドラインの長さ制限 (約3.2万字) を
+# 超えやすく、npm の .cmd からは安全に渡せないので使わない。
+# Claude Code は使えるツールを Web 検索だけに絞っている (手元のファイルを読ませない)。
+# Codex の read-only サンドボックスは書き込みと通信を止めるだけで、ファイルの読み取りはできる。
+# Web 由来の直前情報を読む predict には codex_cli を使わないことをすすめる。
 [cli]
 timeout = 600
-claude_cli = ["claude", "-p", "{prompt}"]
-gemini_cli = ["gemini", "-p", "{prompt}"]
-codex_cli = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"]
+claude_cli = ["claude", "-p", "--tools", "WebSearch", "--allowedTools", "WebSearch"]
+gemini_cli = ["gemini"]
+codex_cli = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-"]

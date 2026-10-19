@@ -66,12 +66,14 @@ DEFAULTS: dict[str, Any] = {
     "openai": {
         "model": "gpt-5",
     },
-    # サブスク契約のCLIを作業者として使う場合のコマンド。{prompt} がプロンプトに置き換わる。
+    # サブスク契約のCLIを作業者として使う場合のコマンド。プロンプトは標準入力で渡す。
+    # ({prompt} を書くと引数で渡すが、Windows ではコマンドラインの長さ制限を超えやすいので使わない)
+    # Claude Code は使えるツールを Web 検索だけに絞る (手元のファイルを読ませない)。
     "cli": {
         "timeout": 600,
-        "claude_cli": ["claude", "-p", "{prompt}"],
-        "gemini_cli": ["gemini", "-p", "{prompt}"],
-        "codex_cli": ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"],
+        "claude_cli": ["claude", "-p", "--tools", "WebSearch", "--allowedTools", "WebSearch"],
+        "gemini_cli": ["gemini"],
+        "codex_cli": ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-"],
     },
 }
 

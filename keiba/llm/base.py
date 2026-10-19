@@ -63,7 +63,16 @@ WORKER_NAMES = ("claude_api", "gemini_api", "openai_api", "claude_cli", "gemini_
 
 
 def make_worker(name: str, settings) -> Worker:
-    """設定名から作業者を作る."""
+    """設定名から作業者を作る. 作れないとき (SDKの初期化失敗など) は WorkerError."""
+    try:
+        return _make_worker(name, settings)
+    except WorkerError:
+        raise
+    except Exception as exc:
+        raise WorkerError(f"{name} を初期化できません: {exc}") from exc
+
+
+def _make_worker(name: str, settings) -> Worker:
     if name == "claude_api":
         from keiba.llm.claude import ClaudeWorker
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from collections.abc import Callable, Iterable
@@ -28,8 +29,13 @@ Progress = Callable[[str], None]
 
 # ---------------------------------------------------------------- モデルの保存場所
 
+def models_dir(settings: Settings) -> Path:
+    """モデルの置き場所. DBごとに分ける (デモDBで学習したモデルが実データの予想に使われないように)."""
+    return settings.path("models") / settings.db_path.stem
+
+
 def latest_model_path(settings: Settings) -> Path | None:
-    models = settings.path("models")
+    models = models_dir(settings)
     pointer = models / "LATEST"
     if pointer.exists():
         path = models / pointer.read_text().strip()
@@ -40,15 +46,38 @@ def latest_model_path(settings: Settings) -> Path | None:
 
 
 def save_model(settings: Settings, bundle: ModelBundle) -> Path:
-    models = settings.path("models")
+    models = models_dir(settings)
+    bundle.metrics["db"] = str(settings.db_path.resolve())  # どのDBで学習したか
     path = bundle.save(models / f"{bundle.version}.joblib")
     (models / "LATEST").write_text(path.name)
     return path
 
 
-def load_model(settings: Settings, path: str | Path | None = None) -> ModelBundle | None:
-    path = Path(path) if path else latest_model_path(settings)
-    return ModelBundle.load(path) if path and path.exists() else None
+def load_model(
+    settings: Settings, path: str | Path | None = None, *, progress: Progress = print
+) -> ModelBundle | None:
+    """モデルを読む. path 未指定なら このDBの最新、なければ None (市場の勝率だけで予想する).
+
+    path を指定したのに見つからないときは、黙って市場だけにせず FileNotFoundError にする。
+    ファイル名だけ (keiba train --name の名前) でも、このDBのモデル置き場から探す。
+    """
+    if path:
+        given, models = Path(path), models_dir(settings)
+        for cand in (given, models / given, models / f"{given}.joblib"):
+            if cand.is_file():
+                return ModelBundle.load(cand)
+        raise FileNotFoundError(f"モデルファイルが見つかりません: {path}")
+    found = latest_model_path(settings)
+    if found is None:
+        if any(settings.path("models").glob("*.joblib")):
+            progress(f"注意: {settings.path('models')} 直下の古いモデルは使いません (モデルはDBごとに "
+                     f"{models_dir(settings)} に置きます)。keiba train で学習し直すか --model で指定してください")
+        return None
+    bundle = ModelBundle.load(found)
+    trained_on = bundle.metrics.get("db")
+    if trained_on and trained_on != str(settings.db_path.resolve()):
+        progress(f"注意: モデル {found.name} は別のDB ({trained_on}) で学習したものです")
+    return bundle
 
 
 # ---------------------------------------------------------------- 予想
@@ -85,6 +114,59 @@ def _news_dict(conn: sqlite3.Connection, race_id: str) -> dict[str, Any] | None:
     return items[0] if items else None
 
 
+def _attempt(label: str, progress: Progress, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """AI作業者の1役割を実行する. 失敗しても (APIキー未設定・通信断・出力不正など) None を返して先へ進む."""
+    try:
+        return fn(*args, **kwargs)
+    except WorkerError as exc:
+        progress(f"{label}: 作業者エラー ({exc})")
+    except Exception as exc:  # SDKの想定外の例外でも、統計の予想ページと一覧は必ず作る
+        log.info("作業者の想定外のエラー", exc_info=True)
+        progress(f"{label}: 作業者エラー ({exc.__class__.__name__}: {exc})")
+    return None
+
+
+def _drop_stale_cards(runs: pd.DataFrame, race_ids: list[str], progress: Progress) -> pd.DataFrame:
+    """対象レース以外の未確定レース (出馬表だけの行) を除く.
+
+    成績を取り込んでいない過去の出馬表が残っていると、その馬の前走が「着順なしの1走」として数えられ、
+    近走の特徴量が欠けた (学習時には無い) 組み合わせになる。対象より後の出馬表は特徴量に関係しない。
+    """
+    targeted = runs["race_id"].isin(race_ids)
+    keep = (runs["is_future"] == 0) | targeted
+    if targeted.any():
+        stale = runs[~keep & (runs["date"] < runs.loc[targeted, "date"].min())]
+        if not stale.empty:
+            first, last = stale["date"].min().date(), stale["date"].max().date()
+            progress(f"注意: 成績が未取得の過去レースが {stale['race_id'].nunique()}件あります ({first}〜{last})。"
+                     f"前走の情報が欠けるので keiba collect results --start {first} --end {last} で取り込んでください")
+    return runs[keep].reset_index(drop=True)
+
+
+# 一覧用の要約に残す本命馬の項目
+INDEX_TOP_KEYS = ("number", "horse_name", "p_win")
+
+
+def _save_summary(path: Path, item: dict[str, Any]) -> None:
+    """一覧用の要約をレースページの隣に保存する (あとで一覧をその日の全レースから作り直すため)."""
+    top = item.get("top")
+    item = {**item, "top": {k: top.get(k) for k in INDEX_TOP_KEYS} if top else None}
+    path.write_text(json.dumps(render.np_safe(item), ensure_ascii=False, default=str), encoding="utf-8")
+
+
+def _load_summaries(day_dir: Path) -> list[dict[str, Any]]:
+    """その日のレースページ (HTMLが残っているもの) の要約をすべて読む."""
+    items = []
+    for p in sorted(day_dir.glob("*.summary.json")):
+        if not p.with_name(p.name.removesuffix(".summary.json") + ".html").exists():
+            continue
+        try:
+            items.append(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            log.warning("一覧用の要約を読めません: %s", p)
+    return items
+
+
 def build_reports(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -103,6 +185,7 @@ def build_reports(
     runs = F.load_runs(conn)
     if runs.empty:
         raise ValueError("DBにデータがありません。先に collect か demo を実行してください")
+    runs = _drop_stale_cards(runs, race_ids, progress)
     baseline = bundle.baseline if bundle else F.SpeedBaseline().fit(runs[runs["is_future"] == 0])
     feat = F.build_features(runs, baseline)
     target = feat[feat["race_id"].isin(race_ids)]
@@ -139,13 +222,16 @@ def build_reports(
         if not name:
             return None
         if name not in workers:
-            workers[name] = make_worker(name, settings)
+            try:
+                workers[name] = make_worker(name, settings)
+            except Exception as exc:  # APIキー未設定・未インストールなど. 1回だけ知らせ、AIなしで続ける
+                workers[name] = None
+                progress(f"作業者 {name} を使えません ({exc})")
         return workers[name]
 
     out_root = settings.path("reports")
     pages: list[Path] = []
-    index_items: dict[str, list[dict[str, Any]]] = {}
-    demo_dates: set[str] = set()
+    day_dirs: dict[str, Path] = {}
     for race_id in [r for r in race_ids if r not in missing]:
         race = db.get_race(conn, race_id)
         pred = pred_all[pred_all["race_id"] == race_id]
@@ -159,41 +245,56 @@ def build_reports(
 
         news = _news_dict(conn, race_id)
         ctx = context(news=news)
+        stale = False  # 今回AI予想を頼んだのに作れなかった
         if roles and is_target(race, llm_filter):
             label = f"{race['venue']}{race['race_num']}R"
-            try:
-                if "news" in roles and (w := worker_for("news")):
-                    progress(f"{label}: {w.name} が直前情報を収集中…")
-                    res = llm_tasks.gather_news(w, ctx)
+            # 役割ごとに失敗を分ける (直前情報が取れなくても予想は作る)
+            if "news" in roles and (w := worker_for("news")):
+                progress(f"{label}: {w.name} が直前情報を収集中…")
+                res = _attempt(label, progress, llm_tasks.gather_news, w, ctx)
+                if res is not None:
                     db.save_news(conn, race_id, res.worker, res.text, dedupe_sources(res.sources))
                     conn.commit()
                     news = _news_dict(conn, race_id)
-                if "predict" in roles and (w := worker_for("predict")):
+            if "predict" in roles:
+                res = None
+                if w := worker_for("predict"):
                     progress(f"{label}: {w.name} が予想を作成中…")
-                    res = llm_tasks.predict(w, ctx, budget=budget, news=news["content"] if news else None)
+                    res = _attempt(label, progress, llm_tasks.predict, w, ctx, budget=budget,
+                                   news=news["content"] if news else None)
+                if res is not None:
                     db.save_analysis(conn, race_id, "predict", res.worker, res.data)
                     conn.commit()
-                analysis = db.latest_analysis(conn, race_id, "predict")
-                if "review" in roles and analysis and (w := worker_for("review")):
-                    progress(f"{label}: {w.name} がセカンドオピニオンを作成中…")
-                    res = llm_tasks.review(w, ctx, analysis["content"])
-                    db.save_analysis(conn, race_id, "review", res.worker, res.text)
+                stale = res is None
+            analysis = db.latest_analysis(conn, race_id, "predict")
+            if stale and analysis:
+                # 古い予想を点検しても意味が薄いので、セカンドオピニオンは作らない
+                progress(f"{label}: 予想を作れなかったので、前回のAI予想 ({analysis['created_at']}) を表示します")
+            elif "review" in roles and analysis and (w := worker_for("review")):
+                progress(f"{label}: {w.name} がセカンドオピニオンを作成中…")
+                res = _attempt(label, progress, llm_tasks.review, w, ctx, analysis["content"])
+                if res is not None:
+                    db.save_analysis(conn, race_id, "review", res.worker, res.text, ref_id=analysis["id"])
                     conn.commit()
-            except WorkerError as exc:
-                progress(f"{label}: 作業者エラー ({exc})")
         analysis = db.latest_analysis(conn, race_id, "predict")
-        review = db.latest_analysis(conn, race_id, "review")
+        # セカンドオピニオンは、表示する予想を点検したものだけ出す
+        review = db.review_for(conn, race_id, analysis["id"]) if analysis else None
+        if analysis and stale:
+            analysis["stale"] = True
         if analysis or review or news:
             ctx = context(analysis=analysis, review=review, news=news)
         path = render.render_race(ctx, day_dir / f"{race_id}.html")
         pages.append(path)
-        index_items.setdefault(race["date"], []).append(render.summarize_for_index(ctx, f"{race_id}.html"))
-        if race.get("source") == "demo":
-            demo_dates.add(race["date"])
+        item = render.summarize_for_index(ctx, f"{race_id}.html")
+        item["is_demo"] = race.get("source") == "demo"
+        _save_summary(day_dir / f"{race_id}.summary.json", item)
+        day_dirs[race["date"]] = day_dir
 
-    for day, items in index_items.items():
-        pages.append(render.render_index(day, items, out_root / day.replace("-", "") / "index.html",
-                                         is_demo=day in demo_dates))
+    # 一覧は今回作ったレースだけでなく、その日のレースページすべてから作り直す (1レースだけ更新しても減らない)
+    for day, day_dir in day_dirs.items():
+        items = _load_summaries(day_dir)
+        pages.append(render.render_index(day, items, day_dir / "index.html",
+                                         is_demo=any(it.get("is_demo") for it in items)))
     return pages
 
 
@@ -203,6 +304,75 @@ def upcoming_race_ids(conn: sqlite3.Connection, day: str) -> list[str]:
     return [rid for rid in db.race_ids_on(conn, day)
             if conn.execute("SELECT 1 FROM entries WHERE race_id = ? LIMIT 1", (rid,)).fetchone()
             or db.has_results(conn, rid)]
+
+
+def unsettled_race_ids(conn: sqlite3.Connection, before: str) -> list[str]:
+    """出馬表だけあって成績が未取得の、指定日より前のレース (デモデータは除く)."""
+    rows = conn.execute("""
+        SELECT DISTINCT ra.race_id, ra.date FROM races ra JOIN entries e USING (race_id)
+        WHERE ra.date < ? AND COALESCE(ra.source, '') != 'demo'
+          AND ra.race_id NOT IN (SELECT race_id FROM results)
+        ORDER BY ra.date, ra.race_id
+    """, (before,)).fetchall()
+    return [r[0] for r in rows]
+
+
+# 1件ずつ取りに行く処理で、取得エラーがこの回数続いたら (通信できない・アクセス拒否) 収集をやめる
+MAX_FETCH_FAILURES = 3
+
+
+def _fetch_each(race_ids: list[str], fetch: Callable[[str], Any], what: str, progress: Progress) -> None:
+    from keiba.scraper.http import FetchError
+
+    failures = 0
+    for race_id in race_ids:
+        try:
+            fetch(race_id)
+            failures = 0
+        except FetchError as exc:
+            failures += 1
+            progress(f"  {race_id}: {what}スキップ ({exc})")
+            if failures >= MAX_FETCH_FAILURES:
+                raise
+        except Exception as exc:  # オッズ未発売・成績未確定などは続行
+            progress(f"  {race_id}: {what}スキップ ({exc})")
+
+
+def _collect_day(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    day: date,
+    *,
+    odds: bool,
+    history: bool,
+    pedigree: bool,
+    progress: Progress,
+) -> None:
+    from keiba.scraper import collect
+    from keiba.scraper.http import Fetcher
+
+    fetcher = Fetcher.from_settings(settings)
+    collect.collect_cards_for_date(conn, fetcher, day, progress=progress)
+    # 前の開催日の出馬表だけ残っているレースは、成績を取り込んでから予想する (前走の情報が欠けないように)
+    unsettled = unsettled_race_ids(conn, min(day, date.today()).isoformat())
+    if unsettled:
+        progress(f"成績が未取得の過去レース {len(unsettled)}件の成績を取得します")
+        _fetch_each(unsettled, lambda rid: collect.collect_race(conn, fetcher, rid), "成績取得", progress)
+    ids = db.race_ids_on(conn, day.isoformat())
+    if odds:
+        _fetch_each(ids, lambda rid: collect.collect_odds(conn, fetcher, rid), "オッズ取得", progress)
+    horse_ids = [r[0] for r in conn.execute(
+        f"SELECT DISTINCT horse_id FROM entries WHERE race_id IN ({','.join('?' * len(ids))})", ids
+    ).fetchall()] if ids else []
+    if history and horse_ids:
+        progress(f"出走馬 {len(horse_ids)}頭の過去レースを補完します (時間がかかります)")
+        collect.collect_horse_histories(conn, fetcher, horse_ids, progress=progress)
+    if pedigree and horse_ids:
+        known = {r[0] for r in conn.execute("SELECT horse_id FROM horses").fetchall()}
+        todo = [h for h in horse_ids if h not in known]
+        if todo:
+            progress(f"血統 {len(todo)}頭を取得します")
+            collect.collect_pedigrees(conn, fetcher, todo, progress=progress)
 
 
 def run_day(
@@ -222,39 +392,19 @@ def run_day(
 ) -> list[Path]:
     """開催日1日分: 出馬表・オッズ収集 → 予想 → レポート."""
     day_str = day.isoformat()
+    bundle = load_model(settings, model_path, progress=progress)  # --model の指定ミスは収集の前に知らせる
     if not offline:
-        from keiba.scraper import collect
-        from keiba.scraper.http import Fetcher, FetchError
+        from keiba.scraper.http import FetchError
 
-        fetcher = Fetcher.from_settings(settings)
-        collect.collect_cards_for_date(conn, fetcher, day, progress=progress)
-        ids = db.race_ids_on(conn, day_str)
-        if odds:
-            for race_id in ids:
-                try:
-                    collect.collect_odds(conn, fetcher, race_id)
-                except Exception as exc:  # オッズ未発売などは続行
-                    progress(f"  {race_id}: オッズ取得スキップ ({exc})")
-        horse_ids = [r[0] for r in conn.execute(
-            f"SELECT DISTINCT horse_id FROM entries WHERE race_id IN ({','.join('?' * len(ids))})", ids
-        ).fetchall()] if ids else []
-        if history and horse_ids:
-            progress(f"出走馬 {len(horse_ids)}頭の過去レースを補完します (時間がかかります)")
-            collect.collect_horse_histories(conn, fetcher, horse_ids, progress=progress)
-        if pedigree and horse_ids:
-            known = {r[0] for r in conn.execute("SELECT horse_id FROM horses").fetchall()}
-            todo = [h for h in horse_ids if h not in known]
-            if todo:
-                progress(f"血統 {len(todo)}頭を取得します")
-                try:
-                    collect.collect_pedigrees(conn, fetcher, todo, progress=progress)
-                except FetchError as exc:
-                    progress(f"血統取得を中断 ({exc})")
+        try:
+            _collect_day(conn, settings, day, odds=odds, history=history, pedigree=pedigree, progress=progress)
+        except FetchError as exc:  # アクセス拒否・通信断. --offline と同じく DB にある分だけで作る
+            progress(f"注意: 取得に失敗したので収集をやめ、DBにあるデータだけでレポートを作ります。"
+                     f"出馬表・オッズは前回取得した時点のものです ({exc})")
 
     race_ids = upcoming_race_ids(conn, day_str)
     if venue:
         race_ids = [rid for rid in race_ids if (db.get_race(conn, rid) or {}).get("venue") == venue]
     if not race_ids:
         raise ValueError(f"{day_str} のレースがDBにありません")
-    bundle = load_model(settings, model_path)
     return build_reports(conn, settings, race_ids, bundle=bundle, roles=roles, llm_filter=llm_filter, progress=progress)
