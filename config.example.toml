@@ -1,0 +1,55 @@
+# 設定ファイルの例。config.toml という名前でコピーして使う (config.toml はGitに入れない)。
+#   cp config.example.toml config.toml
+# APIキーはここに書かず、環境変数で渡す:
+#   export ANTHROPIC_API_KEY=...   (Claude)
+#   export GEMINI_API_KEY=...      (Gemini)
+#   export OPENAI_API_KEY=...      (OpenAI)
+
+[paths]
+db = "data/keiba.sqlite"
+raw_cache = "data/raw"
+models = "models"
+reports = "reports"
+
+[http]
+# netkeibaへのアクセス間隔(秒)。1秒未満にはできない。
+min_interval = 1.5
+jitter = 0.5
+
+[betting]
+bankroll = 100000          # 資金 (円)
+kelly_fraction = 0.25      # ケリー基準の何割を賭けるか (0.25 = 1/4ケリー)
+min_ev = 1.15              # これ以上の期待値の馬券だけ買う
+min_prob = 0.02            # 勝率がこれ未満の大穴は買わない
+max_bet_ratio = 0.05       # 1点あたり資金の何割まで
+max_stake = 30000          # 1点あたりの上限額 (円)
+race_budget_ratio = 0.10   # 1レースあたり資金の何割まで
+
+# 役割ごとの作業者。空文字 "" ならその役割は使わない。
+#   claude_api / gemini_api / openai_api : 各社API (従量課金)
+#   claude_cli / gemini_cli / codex_cli  : 各社CLI (サブスク契約の範囲で動く)
+[workers]
+news = "claude_api"     # 直前情報の収集 (Web検索)
+predict = "claude_api"  # 印・買い目・見解
+review = ""             # セカンドオピニオン。例: "gemini_api" や "codex_cli"
+
+[claude]
+model = "claude-opus-5-5"
+effort = "high"          # 予想の思考の深さ: low / medium / high / xhigh / max
+news_effort = "medium"   # 情報集め
+max_tokens = 16000
+web_search_max_uses = 6
+fallbacks = true         # 安全分類器に断られたとき別モデルで再実行
+
+[gemini]
+model = "gemini-flash-latest"
+
+[openai]
+model = "gpt-5"
+
+# CLIのコマンド。{prompt} がプロンプトに置き換わる。
+[cli]
+timeout = 600
+claude_cli = ["claude", "-p", "{prompt}"]
+gemini_cli = ["gemini", "-p", "{prompt}"]
+codex_cli = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"]

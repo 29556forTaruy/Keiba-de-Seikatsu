@@ -1,0 +1,87 @@
+{% extends "base.html.j2" %}
+{% block title %}バックテスト {{ bt.start }}〜{{ bt.end }} | 競馬で生活{% endblock %}
+{% block body %}
+{% if is_demo %}<div class="demo-banner">【デモ】架空のデータでの結果です。実際のレースで同じ成績が出ることを意味しません。</div>{% endif %}
+<header class="page">
+  <div class="eyebrow">バックテスト ・ モデル {{ bt.model_version }}</div>
+  <h1>{{ bt.start }} 〜 {{ bt.end }}</h1>
+  <div class="meta"><span>{{ bt.races }}レース</span><span>確定オッズで計算（実戦はやや不利になります）</span></div>
+</header>
+{% for w in bt.warnings %}<div class="warn">{{ w }}</div>{% endfor %}
+
+<section class="card">
+  <h2>戦略別の成績</h2>
+  <div class="scroll"><table>
+    <tr><th>戦略</th><th>内容</th><th class="num">購入数</th><th class="num">的中率</th><th class="num">購入額</th><th class="num">払戻額</th><th class="num">回収率</th><th class="num">収支</th><th class="num">最大ドローダウン</th></tr>
+    {% for s in bt.strategies %}
+    <tr>
+      <td>{{ s.name }}</td><td class="note">{{ s.description }}</td>
+      <td class="num">{{ s.bets }}</td><td class="num">{{ s.hit_rate | pct }}</td>
+      <td class="num">{{ s.stake | yen }}</td><td class="num">{{ s.payout | yen }}</td>
+      <td class="num">{% if s.roi >= 1 %}<span class="good">▲ {{ s.roi | pct }}</span>{% else %}{{ s.roi | pct }}{% endif %}</td>
+      <td class="num">{{ s.profit | signed_yen }}</td><td class="num">{{ s.max_drawdown | yen }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  <p class="note">回収率 100% 超が「プラス」。JRAの控除率は単勝20%なので、何も考えずに買うと長期的に約80%に収束します。</p>
+</section>
+
+<section class="card">
+  <h2>累積収支（100円均一の戦略）</h2>
+  <div class="legend">{% for s in flat_series %}<span><i style="background: var(--series-{{ s.slot }})"></i>{{ s.name }}</span>{% endfor %}</div>
+  {{ flat_chart | safe }}
+  <p class="note">横軸は購入順（戦略ごとに購入数が異なるため、各線の長さは違います）。</p>
+</section>
+
+<section class="card">
+  <h2>ケリー資金管理の資金推移</h2>
+  <p class="note">初期資金 {{ bt.start_bankroll | yen }} → 最終 {{ bt.final_bankroll | yen }}。横軸はレース順。</p>
+  {{ equity_chart | safe }}
+</section>
+
+<section class="card">
+  <h2>確率の当てはまり（キャリブレーション）</h2>
+  <p class="note">予想勝率の帯ごとに、実際の勝率を比較。近いほど確率が信頼できます。</p>
+  <div class="scroll"><table>
+    <tr><th>予想勝率の帯</th><th class="num">頭数</th><th class="num">予想の平均</th><th class="num">実際の勝率</th><th class="num">差</th></tr>
+    {% for c in bt.calibration %}
+    <tr><td>{{ c.bin }}</td><td class="num">{{ c.count }}</td><td class="num">{{ c.predicted | pct }}</td><td class="num">{{ c.actual | pct }}</td>
+      <td class="num">{{ "%+.1f"|format((c.actual - c.predicted) * 100) }}pt</td></tr>
+    {% endfor %}
+  </table></div>
+</section>
+
+<section class="card">
+  <h2>月別の回収率</h2>
+  <div class="scroll"><table>
+    <tr><th>月</th>{% for s in bt.strategies %}<th class="num">{{ s.name }}</th>{% endfor %}</tr>
+    {% for month in months %}
+    <tr><td>{{ month }}</td>
+      {% for s in bt.strategies %}{% set m = monthly[s.name].get(month) %}
+      <td class="num">{% if m %}{{ m.roi | pct0 }}{% else %}-{% endif %}</td>{% endfor %}
+    </tr>
+    {% endfor %}
+  </table></div>
+</section>
+
+{% if bt.model_metrics %}
+<section class="card">
+  <h2>モデルの情報</h2>
+  <div class="chips">
+    <span class="chip">学習 <b>{{ bt.model_metrics.train_races }}</b>レース</span>
+    <span class="chip">検証 <b>{{ bt.model_metrics.valid_races }}</b>レース</span>
+    <span class="chip">温度 τ <b>{{ bt.model_metrics.tau }}</b></span>
+    {% if bt.model_metrics.blend %}<span class="chip">ブレンド (モデル, 市場) <b>{{ bt.model_metrics.blend[0] }}, {{ bt.model_metrics.blend[1] }}</b></span>{% endif %}
+  </div>
+  {% if test_metrics %}
+  <h3>テスト期間の精度</h3>
+  <div class="scroll"><table>
+    <tr><th></th><th class="num">対数損失（小さいほど良い）</th><th class="num">本命的中率</th></tr>
+    <tr><td>モデル単独</td><td class="num">{{ test_metrics.nll_model }}</td><td class="num">{{ test_metrics.top1_model | pct }}</td></tr>
+    <tr><td>オッズ（市場）</td><td class="num">{{ test_metrics.nll_market }}</td><td class="num">{{ test_metrics.top1_market | pct }}</td></tr>
+    <tr><td>ブレンド</td><td class="num">{{ test_metrics.nll_blend }}</td><td class="num">{{ test_metrics.top1_blend | pct }}</td></tr>
+  </table></div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

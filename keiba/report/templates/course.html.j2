@@ -1,0 +1,39 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ race.venue }}{{ race.surface_label }}{{ race.distance }}m の傾向 | 競馬で生活{% endblock %}
+{% block body %}
+{% if is_demo %}<div class="demo-banner">【デモ】架空のデータで作ったレポートです。</div>{% endif %}
+<header class="page">
+  <div class="eyebrow">コース傾向</div>
+  <h1>{{ race.venue }} {{ race.surface_label }}{{ race.distance }}m</h1>
+  <div class="meta">{% if trends.races %}<span>{{ trends.since }} 以降 {{ trends.races }}レース</span>{% endif %}</div>
+</header>
+{% if trends.races %}
+<section class="card">
+  <div class="grid2">
+    {% for title, rows in [("枠番別", trends.frame), ("脚質別", trends.style), ("人気別", trends.popularity)] %}
+    <div class="scroll"><table>
+      <tr><th>{{ title }}</th><th>着別度数</th><th class="num">勝率</th><th>複勝率</th><th class="num">単回収</th></tr>
+      {% for r in rows %}
+      <tr><td>{% if title == "枠番別" %}<span class="frame f{{ r.key }}">{{ r.key }}</span>{% else %}{{ r.key }}{% endif %}</td><td>{{ r.text }}</td><td class="num">{{ r.win | pct }}</td>
+        <td><span class="bar" style="width: 64px"><span style="width: {{ (r.top3 or 0) * 100 }}%"></span></span>{{ r.top3 | pct }}</td><td class="num">{{ r.roi | pct0 }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% endfor %}
+    {% if trends.jockeys %}
+    <div class="scroll"><table>
+      <tr><th>騎手（10騎乗以上）</th><th>着別度数</th><th class="num">勝率</th><th class="num">複勝率</th></tr>
+      {% for r in trends.jockeys %}<tr><td>{{ r.name }}</td><td>{{ r.text }}</td><td class="num">{{ r.win | pct }}</td><td class="num">{{ r.top3 | pct }}</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+    {% if trends.sires %}
+    <div class="scroll"><table>
+      <tr><th>種牡馬</th><th>着別度数</th><th class="num">勝率</th><th class="num">複勝率</th></tr>
+      {% for r in trends.sires %}<tr><td>{{ r.name }}</td><td>{{ r.text }}</td><td class="num">{{ r.win | pct }}</td><td class="num">{{ r.top3 | pct }}</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+  </div>
+</section>
+{% else %}
+<p>このコースの過去データがまだありません。</p>
+{% endif %}
+{% endblock %}

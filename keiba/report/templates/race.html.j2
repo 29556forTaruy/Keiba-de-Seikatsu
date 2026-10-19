@@ -1,0 +1,214 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ race.venue }}{{ race.race_num }}R {{ race.race_name or "" }} | 競馬で生活{% endblock %}
+{% block topbar %}{% if index_href %}<a href="{{ index_href }}">← {{ race.date_label }} のレース一覧</a>{% endif %}{% endblock %}
+{% block body %}
+{% if race.source == "demo" %}
+<div class="demo-banner">【デモ】架空のデータで作ったレポートです。実在の馬・騎手・レースではありません。</div>
+{% endif %}
+<header class="page">
+  <div class="eyebrow">{{ race.date_label }} ・ {{ race.venue }} {{ race.race_num }}R{% if race.start_time %} ・ {{ race.start_time }}発走{% endif %}</div>
+  <h1>{{ race.race_name or race.race_class or "" }}
+    {% if race.grade %}<span class="badge {{ 'g1' if race.grade == 'G1' else '' }}">{{ race.grade }}</span>{% endif %}
+  </h1>
+  <div class="meta">
+    <span>{{ race.surface_label }}{{ race.distance }}m{% if race.direction %}（{{ race.direction }}{% if race.course_detail %}・{{ race.course_detail }}{% endif %}）{% endif %}</span>
+    {% if race.going %}<span>馬場: {{ race.going }}</span>{% endif %}
+    {% if race.weather %}<span>天候: {{ race.weather }}</span>{% endif %}
+    {% if race.race_class %}<span>{{ race.race_class }}</span>{% endif %}
+    <span>{{ horses|length }}頭</span>
+  </div>
+</header>
+
+{% if analysis %}
+<section class="card analysis">
+  <h2>AI予想 <span class="note">（{{ analysis.worker }}）</span></h2>
+  {% set a = analysis.content %}
+  {% if a.skip_reason %}<div class="warn">見送り推奨: {{ a.skip_reason }}</div>{% endif %}
+  <p>{{ a.summary }}</p>
+  {% if a.pace %}<p class="note">想定ペース: {{ a.pace }}{% if a.confidence %} ・ 自信度: {{ a.confidence }}{% endif %}</p>{% endif %}
+  {% if a.marks %}
+  <div class="scroll"><table>
+    <tr><th>印</th><th class="num">馬番</th><th>馬名</th><th>理由</th></tr>
+    {% for m in a.marks %}
+    <tr><td><span class="mark">{{ m.mark }}</span></td><td class="num">{{ m.number }}</td><td>{{ names.get(m.number, "") }}</td><td style="white-space: normal">{{ m.reason }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+  {% if a.bets %}
+  <h3>買い目</h3>
+  <div class="scroll"><table>
+    <tr><th>券種</th><th>組番</th><th class="num">金額</th><th>理由</th></tr>
+    {% for b in a.bets %}
+    <tr><td>{{ b.type }}</td><td>{{ b.combination }}</td><td class="num">{{ b.amount | yen }}</td><td style="white-space: normal">{{ b.reason }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+  {% if a.risks %}<h3>不安材料</h3><ul>{% for r in a.risks %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+  {% if review %}<h3>セカンドオピニオン <span class="note">（{{ review.worker }}）</span></h3><p style="white-space: pre-wrap">{{ review.content }}</p>{% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>予想勝率</h2>
+  <p class="note">モデル{% if model %}（{{ model.version }}）{% endif %}の勝率。オッズがあるときは市場の評価とブレンド済み。期待値 = 勝率 × 単勝オッズ（1.0 を超えると理論上プラス）。</p>
+  <div class="scroll"><table>
+    <tr><th>印</th><th>枠</th><th class="num">馬番</th><th>馬名</th><th>予想勝率</th><th class="num">単勝</th><th class="num">期待値</th>
+      <th class="num">人気</th><th class="num">複勝圏</th><th class="num">市場勝率</th><th>性齢</th><th class="num">斤量</th><th>騎手</th></tr>
+    {% for h in horses_by_prob %}
+    <tr>
+      <td><span class="mark">{{ h.mark }}</span></td>
+      <td><span class="frame f{{ h.frame or 0 }}">{{ h.frame or "-" }}</span></td>
+      <td class="num">{{ h.number }}</td>
+      <td><a href="#h{{ h.number }}">{{ h.horse_name }}</a></td>
+      <td><span class="bar" title="{{ h.p_win | pct }}"><span style="width: {{ (h.p_win or 0) / max_p * 100 }}%"></span></span>{{ h.p_win | pct }}</td>
+      <td class="num">{{ h.win_odds | odds }}</td>
+      <td class="num">{% if h.ev is not none %}{% if h.ev >= min_ev %}<span class="good">▲ {{ "%.2f"|format(h.ev) }}</span>{% else %}{{ "%.2f"|format(h.ev) }}{% endif %}{% else %}-{% endif %}</td>
+      <td class="num">{{ h.popularity or "-" }}</td>
+      <td class="num">{{ h.p_place | pct }}</td>
+      <td class="num">{{ h.p_market | pct }}</td>
+      <td>{{ h.sex }}{{ h.age }}</td>
+      <td class="num">{{ h.weight_carried | num1 }}</td>
+      <td>{{ h.jockey_name }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% if not has_odds %}<p class="note">オッズ未取得のため、市場勝率・期待値は空欄です（<code>keiba collect odds {{ race.race_id }}</code>）。</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>推奨馬券</h2>
+  {% if bets %}
+  <p class="note">期待値 {{ min_ev }} 以上の単勝・複勝に、資金 {{ bankroll | yen }} の分数ケリーで配分。</p>
+  <div class="scroll"><table>
+    <tr><th>券種</th><th>馬番</th><th>馬名</th><th class="num">確率</th><th class="num">オッズ</th><th class="num">期待値</th><th class="num">金額</th></tr>
+    {% for b in bets %}
+    <tr><td>{{ b.type }}</td><td>{{ b.combination }}</td><td>{{ b.horse_name }}</td><td class="num">{{ b.prob | pct }}</td>
+      <td class="num">{{ b.odds | odds }}</td><td class="num">{{ "%.2f"|format(b.ev) }}</td><td class="num">{{ b.stake | yen }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p>期待値が基準を超える単勝・複勝はありません。<b>見送り</b>も立派な選択です。</p>
+  {% endif %}
+  <h3>組み合わせの目安</h3>
+  <p class="note">確率上位の組み合わせと「このオッズ以上なら期待値プラス」の目安（Harvilleモデルによる近似）。</p>
+  <div class="grid2">
+    {% for bet_type, rows in combos.items() %}
+    <div class="scroll"><table>
+      <tr><th>{{ bet_type }}</th><th class="num">確率</th><th class="num">必要オッズ</th></tr>
+      {% for c in rows %}<tr><td>{{ c.combination }}</td><td class="num">{{ c.prob | pct }}</td><td class="num">{{ c.min_odds | odds }}倍〜</td></tr>{% endfor %}
+    </table></div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>馬柱（近5走）</h2>
+  {% for h in horses %}
+  <div class="horse" id="h{{ h.number }}">
+    <div class="horse-head">
+      <span class="frame f{{ h.frame or 0 }}">{{ h.number }}</span>
+      <span class="mark">{{ h.mark }}</span>
+      <span class="name">{{ h.horse_name }}</span>
+      <span class="note">{{ h.sex }}{{ h.age }} ・ {{ h.weight_carried | num1 }}kg ・ {{ h.jockey_name }}{% if h.trainer_name %} ・ {{ h.trainer_name }}厩舎{% if h.trainer_region %}（{{ h.trainer_region }}）{% endif %}{% endif %}
+        {% if h.horse_weight %} ・ 馬体重 {{ h.horse_weight }}{% if h.weight_diff is not none %}({{ "%+d"|format(h.weight_diff) }}){% endif %}{% endif %}</span>
+      {% if h.sire %}<span class="note">父 {{ h.sire }}{% if h.damsire %} ・ 母父 {{ h.damsire }}{% endif %}</span>{% endif %}
+    </div>
+    <div class="chips">
+      {% for a in h.aptitude %}<span class="chip">{{ a.label }} <b>{{ a.text }}</b></span>{% endfor %}
+      {% if h.style %}<span class="chip">脚質 <b>{{ h.style }}</b></span>{% endif %}
+      {% if h.days_since is not none %}<span class="chip">間隔 <b>{{ h.days_since }}日</b></span>{% endif %}
+      {% if h.j_n %}<span class="chip">騎手1年 勝率 <b>{{ h.j_win | pct }}</b> ・ 複勝率 <b>{{ h.j_top3 | pct }}</b></span>{% endif %}
+      {% if h.spark %}<span class="chip">指数 {{ h.spark | safe }}</span>{% endif %}
+    </div>
+    {% if h.past_runs %}
+    <div class="scroll"><table>
+      <tr><th>日付</th><th>レース</th><th>条件</th><th class="num">頭数/番</th><th class="num">人気</th><th class="num">着順</th><th class="num">タイム</th><th>着差</th>
+        <th>通過</th><th class="num">上り</th><th>騎手</th><th class="num">斤量</th><th class="num">馬体重</th><th class="num">指数</th><th>勝ち馬(2着馬)</th></tr>
+      {% for r in h.past_runs %}
+      <tr>
+        <td>{{ r.date }}</td>
+        <td>{{ r.venue }} {{ r.race_name }}{% if r.grade %} <span class="badge">{{ r.grade }}</span>{% endif %}</td>
+        <td>{{ r.surface }}{{ r.distance }} {{ r.going }}</td>
+        <td class="num">{{ r.field_size }}/{{ r.number }}</td>
+        <td class="num">{{ r.popularity or "-" }}</td>
+        <td class="num">{% if r.finish_pos %}<span class="pos {{ 'p%d'|format(r.finish_pos) if r.finish_pos <= 3 else '' }}">{{ r.finish_pos }}</span>{% else %}{{ r.finish_status or "-" }}{% endif %}</td>
+        <td class="num">{{ r.time or "-" }}</td>
+        <td>{{ r.margin or "" }}</td>
+        <td>{{ r.passing or "" }}</td>
+        <td class="num">{{ r.last3f | num1 }}</td>
+        <td>{{ r.jockey }}</td>
+        <td class="num">{{ r.weight_carried | num1 }}</td>
+        <td class="num">{{ r.horse_weight or "" }}{% if r.weight_diff is not none %}({{ "%+d"|format(r.weight_diff) }}){% endif %}</td>
+        <td class="num">{{ r.speed_fig | num0 }}</td>
+        <td>{{ r.rival or "" }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="note">DBに過去の出走記録がありません（初出走、またはデータ収集期間外）。</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <h2>コース傾向: {{ race.venue }}{{ race.surface_label }}{{ race.distance }}m</h2>
+  {% if trends.races %}
+  <p class="note">{{ trends.since }} 以降の {{ trends.races }} レース（最大5年）。回収率は単勝を毎回100円買った場合。</p>
+  <div class="grid2">
+    {% for title, rows in [("枠番別", trends.frame), ("脚質別", trends.style), ("人気別", trends.popularity)] %}
+    <div class="scroll"><table>
+      <tr><th>{{ title }}</th><th>着別度数</th><th class="num">勝率</th><th>複勝率</th><th class="num">単回収</th></tr>
+      {% for r in rows %}
+      <tr><td>{% if title == "枠番別" %}<span class="frame f{{ r.key }}">{{ r.key }}</span>{% else %}{{ r.key }}{% endif %}</td><td>{{ r.text }}</td><td class="num">{{ r.win | pct }}</td>
+        <td><span class="bar" style="width: 64px"><span style="width: {{ (r.top3 or 0) * 100 }}%"></span></span>{{ r.top3 | pct }}</td><td class="num">{{ r.roi | pct0 }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% endfor %}
+    {% if trends.jockeys %}
+    <div class="scroll"><table>
+      <tr><th>騎手（10騎乗以上）</th><th>着別度数</th><th class="num">勝率</th><th class="num">複勝率</th></tr>
+      {% for r in trends.jockeys %}<tr><td>{{ r.name }}</td><td>{{ r.text }}</td><td class="num">{{ r.win | pct }}</td><td class="num">{{ r.top3 | pct }}</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+    {% if trends.sires %}
+    <div class="scroll"><table>
+      <tr><th>種牡馬</th><th>着別度数</th><th class="num">勝率</th><th class="num">複勝率</th></tr>
+      {% for r in trends.sires %}<tr><td>{{ r.name }}</td><td>{{ r.text }}</td><td class="num">{{ r.win | pct }}</td><td class="num">{{ r.top3 | pct }}</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="note">このコースの過去データがまだありません。</p>
+  {% endif %}
+</section>
+
+{% if same_race %}
+<section class="card">
+  <h2>過去の{{ race.race_name }}</h2>
+  <div class="scroll"><table>
+    <tr><th>日付</th><th>勝ち馬</th><th>性齢</th><th>騎手</th><th class="num">人気</th><th class="num">単勝</th><th>枠</th><th>脚質</th><th class="num">タイム</th><th>馬場</th></tr>
+    {% for r in same_race %}
+    <tr><td>{{ r.date }}</td><td>{{ r.horse }}</td><td>{{ r.sex_age }}</td><td>{{ r.jockey }}</td><td class="num">{{ r.popularity }}</td>
+      <td class="num">{{ r.odds | odds }}</td><td><span class="frame f{{ r.frame }}">{{ r.frame }}</span></td><td>{{ r.style or "" }}</td><td class="num">{{ r.time or "" }}</td><td>{{ r.going }}</td></tr>
+    {% endfor %}
+  </table></div>
+</section>
+{% endif %}
+
+{% if news %}
+<section class="card">
+  <h2>直前情報 <span class="note">（{{ news.worker }} ・ {{ news.created_at }}）</span></h2>
+  <div style="white-space: pre-wrap">{{ news.content }}</div>
+  {% if news.sources %}
+  <h3>出典</h3>
+  <ul>{% for s in news.sources %}<li><a href="{{ s.url | safe_url }}" rel="noopener noreferrer" target="_blank">{{ s.title or s.url }}</a></li>{% endfor %}</ul>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if model and model.metrics %}
+<p class="note">モデル {{ model.version }}: 学習 〜{{ model.train_end }} ・ 検証 〜{{ model.valid_end }}
+  {% if model.metrics.valid %} ・ 検証期間の本命的中率 {{ model.metrics.valid.top1_blend | pct }}（オッズ1番人気 {{ model.metrics.valid.top1_market | pct }}）{% endif %}</p>
+{% endif %}
+{% endblock %}

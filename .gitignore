@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# 収集データ・モデル・レポートはローカルにだけ置く
+data/
+models/
+reports/
+
+# APIキーなどを書く個人設定
+config.toml
+.env

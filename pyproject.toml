@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keiba-de-seikatsu"
+version = "0.1.0"
+description = "中央競馬(JRA)のデータ収集・過去データ可視化・予想ツール"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "joblib>=1.3",
+    "jinja2>=3.1",
+    "anthropic>=1.0",
+]
+
+[project.optional-dependencies]
+gemini = ["google-genai>=1.0"]
+openai = ["openai>=1.50"]
+all = ["google-genai>=1.0", "openai>=1.50"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+keiba = "keiba.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["keiba*"]
+
+[tool.setuptools.package-data]
+"keiba.report" = ["templates/*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

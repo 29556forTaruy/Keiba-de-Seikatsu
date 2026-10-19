@@ -1,0 +1,31 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ date_label }} のレース | 競馬で生活{% endblock %}
+{% block body %}
+{% if is_demo %}<div class="demo-banner">【デモ】架空のデータで作ったレポートです。</div>{% endif %}
+<header class="page">
+  <div class="eyebrow">レース一覧</div>
+  <h1>{{ date_label }}</h1>
+  <div class="meta"><span>{{ races|length }}レース</span>{% if total_stake %}<span>推奨購入額 合計 {{ total_stake | yen }}</span>{% endif %}</div>
+</header>
+{% for venue, rows in by_venue.items() %}
+<section class="card">
+  <h2>{{ venue }}</h2>
+  <div class="scroll"><table>
+    <tr><th class="num">R</th><th>発走</th><th>レース</th><th>条件</th><th class="num">頭数</th><th>本命</th><th class="num">勝率</th><th>推奨</th><th>AI</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td class="num">{{ r.race_num }}</td>
+      <td>{{ r.start_time or "" }}</td>
+      <td><a href="{{ r.href }}">{{ r.race_name or r.race_class }}</a>{% if r.grade %} <span class="badge {{ 'g1' if r.grade == 'G1' else '' }}">{{ r.grade }}</span>{% endif %}</td>
+      <td>{{ r.surface }}{{ r.distance }}m</td>
+      <td class="num">{{ r.field_size }}</td>
+      <td>{% if r.top %}{{ r.top.number }} {{ r.top.horse_name }}{% endif %}</td>
+      <td class="num">{% if r.top %}{{ r.top.p_win | pct }}{% endif %}</td>
+      <td>{% if r.bets %}<span class="good">▲ {{ r.bets }}点 {{ r.stake | yen }}</span>{% else %}<span class="note">見送り</span>{% endif %}</td>
+      <td>{% if r.analysis %}{{ r.analysis }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+</section>
+{% endfor %}
+{% endblock %}

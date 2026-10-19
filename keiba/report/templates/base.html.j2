@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}競馬で生活{% endblock %}</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f9f9f7;
+  --surface: #fcfcfb;
+  --raised: #ffffff;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #6f6d68;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --wash: rgba(42, 120, 214, 0.08);
+  --link: #1c5cab;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --good: #006300;
+  --critical: #d03b3b;
+  --rank-1: #2a78d6;
+  --rank-2: #86b6ef;
+  --rank-3: #cde2fb;
+  --rank-1-ink: #ffffff;
+  --rank-ink: #0b0b0b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0d0d0d;
+    --surface: #1a1a19;
+    --raised: #222220;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #9b9991;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --wash: rgba(57, 135, 229, 0.14);
+    --link: #86b6ef;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --good: #0ca30c;
+    --critical: #e66767;
+    --rank-1: #3987e5;
+    --rank-2: #1c5cab;
+    --rank-3: #104281;
+    --rank-1-ink: #ffffff;
+    --rank-ink: #f0efec;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d0d0d;
+  --surface: #1a1a19;
+  --raised: #222220;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --muted: #9b9991;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --wash: rgba(57, 135, 229, 0.14);
+  --link: #86b6ef;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --good: #0ca30c;
+  --critical: #e66767;
+  --rank-1: #3987e5;
+  --rank-2: #1c5cab;
+  --rank-3: #104281;
+  --rank-1-ink: #ffffff;
+  --rank-ink: #f0efec;
+}
+* { box-sizing: border-box; }
+html {
+  /* 日本語フォントのみ指定 (中国語フォントへのフォールバックを避ける) */
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", YuGothic, Meiryo, "Noto Sans JP", "IPAexGothic", "IPAGothic", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+body { margin: 0; background: var(--bg); color: var(--text); }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+main { max-width: 1120px; margin: 0 auto; padding: 16px 16px 48px; }
+header.page { margin: 8px 0 20px; }
+header.page h1 { font-size: 1.6rem; line-height: 1.3; margin: 4px 0; }
+.eyebrow { color: var(--text-2); font-size: 0.9rem; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-2); font-size: 0.92rem; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 700; vertical-align: middle;
+  border: 1px solid var(--border); background: var(--raised); color: var(--text); }
+.badge.g1 { background: var(--rank-1); color: var(--rank-1-ink); border-color: transparent; }
+.demo-banner { background: var(--wash); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px; font-size: 0.9rem; }
+section.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 16px 0; }
+section.card > h2 { font-size: 1.15rem; margin: 0 0 12px; }
+section.card h3 { font-size: 1rem; margin: 16px 0 8px; }
+.note { color: var(--text-2); font-size: 0.85rem; }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--grid); text-align: left; white-space: nowrap; }
+th { color: var(--text-2); font-weight: 600; font-size: 0.8rem; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:hover td { background: var(--wash); }
+.frame { display: inline-block; width: 1.7em; text-align: center; border-radius: 4px; font-weight: 700; border: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.f1 { background: #ffffff; color: #0b0b0b; } .f2 { background: #222222; color: #ffffff; }
+.f3 { background: #d03b3b; color: #ffffff; } .f4 { background: #1c5cab; color: #ffffff; }
+.f5 { background: #f4d000; color: #0b0b0b; } .f6 { background: #008300; color: #ffffff; }
+.f7 { background: #eb6834; color: #0b0b0b; } .f8 { background: #f2a7c0; color: #0b0b0b; }
+.mark { font-size: 1.1rem; font-weight: 700; width: 1.4em; display: inline-block; text-align: center; }
+.bar { position: relative; height: 10px; width: 120px; background: var(--grid); border-radius: 0 4px 4px 0; display: inline-block; vertical-align: middle; margin-right: 6px; }
+.bar > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--series-1); border-radius: 0 4px 4px 0; }
+.pos { display: inline-block; min-width: 1.8em; text-align: center; border-radius: 4px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pos.p1 { background: var(--rank-1); color: var(--rank-1-ink); }
+.pos.p2 { background: var(--rank-2); color: var(--rank-ink); }
+.pos.p3 { background: var(--rank-3); color: var(--rank-ink); }
+.good { color: var(--good); font-weight: 700; }
+.bad { color: var(--critical); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 0.82rem; background: var(--raised); }
+.chip b { font-variant-numeric: tabular-nums; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.horse { border-top: 1px solid var(--grid); padding: 14px 0; }
+.horse:first-of-type { border-top: none; }
+.horse-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
+.horse-head .name { font-size: 1.1rem; font-weight: 700; }
+.spark .line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.spark .dot { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+.spark .grid { stroke: var(--grid); stroke-width: 1; }
+.chart-wrap { position: relative; }
+.chart { width: 100%; height: auto; display: block; }
+.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .dot { stroke: var(--surface); stroke-width: 2; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .crosshair { stroke: var(--axis); stroke-width: 1; }
+.tooltip { position: absolute; pointer-events: none; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  font-size: 0.82rem; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); min-width: 140px; }
+.tip-head { color: var(--text-2); margin-bottom: 2px; }
+.tip-row { display: flex; align-items: center; gap: 6px; }
+.tip-key { width: 12px; height: 2px; display: inline-block; }
+.tip-name { color: var(--text-2); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 0.85rem; color: var(--text-2); margin-bottom: 6px; }
+.legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 6px; }
+.analysis p { margin: 6px 0; }
+.analysis ul { margin: 6px 0; padding-left: 1.2em; }
+.warn { border-left: 3px solid var(--critical); padding: 6px 10px; background: var(--wash); margin: 8px 0; font-size: 0.9rem; }
+footer { color: var(--muted); font-size: 0.8rem; margin-top: 32px; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; min-height: 28px; }
+.theme-toggle { font-size: 0.8rem; border: 1px solid var(--border); background: var(--raised); color: var(--text); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+@media (max-width: 600px) {
+  html { font-size: 14px; }
+  header.page h1 { font-size: 1.35rem; }
+  section.card { padding: 12px; }
+  .bar { width: 72px; }
+}
+</style>
+</head>
+<body>
+<main>
+<div class="topbar note"><span>{% block topbar %}{% endblock %}</span><button class="theme-toggle" type="button" onclick="toggleTheme()">表示切替</button></div>
+{% block body %}{% endblock %}
+<footer>
+  <p>生成: {{ generated_at }} ・ 競馬で生活 {{ app_version }}</p>
+  <p>このレポートは過去データに基づく統計的な目安です。的中や利益を保証するものではありません。馬券の購入は20歳以上、自己責任で無理のない範囲で。</p>
+</footer>
+</main>
+<script>
+function toggleTheme() {
+  var root = document.documentElement;
+  var dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  root.dataset.theme = dark ? 'light' : 'dark';
+  try { localStorage.setItem('keiba-theme', root.dataset.theme); } catch (e) {}
+}
+try { var t = localStorage.getItem('keiba-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+{{ chart_js | safe }}
+</script>
+</body>
+</html>
