@@ -37,6 +37,25 @@ def test_decode_euc_jp():
     assert "天皇賞" in decode_html(html.replace("EUC-JP", "utf-8").encode("utf-8"))
 
 
+def test_decode_euc_jp_extension_chars():
+    """CP51932 の NEC特殊文字・NEC選定IBM拡張文字を別の漢字に化けさせない."""
+    def e(text: str) -> bytes:
+        return text.encode("euc_jp")
+
+    # 髙=FCE2 (92区), 﨑=F9F5 (89区), ①=ADA1 (13区)
+    body = e('<meta charset="EUC-JP"><p>') + b"\xfc\xe2" + e("杉吏麒 宮") + b"\xf9\xf5" + e("北斗 ") + b"\xad\xa1" + e("</p>")
+    text = decode_html(body)
+    assert "髙杉吏麒" in text and "宮﨑北斗" in text and "①" in text
+    assert "郄" not in text and "粼" not in text
+    # metaタグが無くてもヘッダで EUC-JP と分かれば同じ
+    plain = e("<p>") + b"\xfc\xe2" + e("木登</p>")
+    assert "髙木登" in decode_html(plain, "EUC-JP")
+    # 読めない文字は別の漢字にせず U+FFFD にする (euc_jis_2004 に回さない)
+    broken = e('<meta charset="EUC-JP"><p>天皇賞') + b"\xf5\xa1" + e("</p>")
+    text = decode_html(broken)
+    assert "天皇賞" in text and "\ufffd" in text
+
+
 def test_race_result():
     parsed = parsers.parse_race_result(read("race_result.html"), "202405040911")
     race = parsed["race"]
@@ -100,12 +119,52 @@ def test_shutuba():
     assert entries[4]["sex"] == "セ" and entries[4]["weight_diff"] == 0
 
 
+@pytest.mark.parametrize("going, expected", [
+    ("良", "良"), ("稍", "稍重"), ("稍重", "稍重"), ("重", "重"), ("不", "不良"), ("不良", "不良"),
+])
+def test_shutuba_going_abbreviations(going, expected):
+    """race.netkeiba の出馬表は「馬場:稍」「馬場:不」と略す. 結果ページと同じ表記にそろえる."""
+    html = read("shutuba.html").replace("馬場:重", f"馬場:{going}")
+    assert parsers.parse_shutuba(html, "202608040711")["race"]["going"] == expected
+
+
+@pytest.mark.parametrize("course, expected", [
+    ("(右)", ("右", None)),
+    ("(右 内2周)", ("右", "内2周")),
+    ("(右 外-内)", ("右", "外-内")),
+    ("(左 外)", ("左", "外")),
+    ("(直線)", ("直線", None)),
+])
+def test_shutuba_course_detail_matches_result_page(course, expected):
+    html = read("shutuba.html").replace("(右)", course)
+    race = parsers.parse_shutuba(html, "202608040711")["race"]
+    assert (race["direction"], race["course_detail"]) == expected
+
+
+def test_race_result_without_win_payout_is_parse_error():
+    """1着馬がいるのに単勝の払戻が読めないページは保存しない (バックテストで外れ扱いになるため)."""
+    html = read("race_result.html").replace("pay_table_01", "pay_table_xx")
+    with pytest.raises(parsers.ParseError, match="単勝"):
+        parsers.parse_race_result(html, "202405040911")
+
+
 def test_odds_json():
     parsed = parsers.parse_odds_json(read("odds.json"), "202608040711")
     odds = {o["number"]: o for o in parsed["odds"]}
     assert odds[1]["win_odds"] == 3.2 and odds[1]["popularity"] == 1
     assert odds[2]["place_odds_min"] == 1.5 and odds[2]["place_odds_max"] == 2.1
     assert odds[3]["win_odds"] is None
+    assert parsed["market"] is True
+
+
+def test_odds_json_forecast_is_not_market():
+    """発売前の予想オッズ (status=yoso) は実際のオッズとして扱わない."""
+    text = read("odds.json").replace('"status":"middle"', '"status":"yoso"')
+    parsed = parsers.parse_odds_json(text, "202608040711")
+    assert parsed["status"] == "yoso" and parsed["market"] is False
+    # 発売前の空データも読める
+    empty = parsers.parse_odds_json('{"status":"middle","data":"","reason":"result odds empty"}', "202608040711")
+    assert empty["odds"] == [] and empty["market"] is True
 
 
 def test_pedigree():
