@@ -210,6 +210,8 @@ def train(
     train_end_ts, valid_end_ts = pd.Timestamp(train_end), pd.Timestamp(valid_end)
     if valid_end_ts <= train_end_ts:
         raise ValueError("valid_end は train_end より後にしてください")
+    # 未確定の出馬表 (結果を取り込んでいない過去の出馬表を含む) は学習に要らず、近走の特徴量を乱すので除く
+    df = df[df["is_future"] == 0]
     baseline = F.SpeedBaseline().fit(df[df["date"] <= train_end_ts])
     feat = F.build_features(df, baseline)
     rows = training_rows(feat)

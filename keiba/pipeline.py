@@ -322,13 +322,15 @@ MAX_FETCH_FAILURES = 3
 
 
 def _fetch_each(race_ids: list[str], fetch: Callable[[str], Any], what: str, progress: Progress) -> None:
-    from keiba.scraper.http import FetchError
+    from keiba.scraper.http import AccessDenied, FetchError
 
     failures = 0
     for race_id in race_ids:
         try:
             fetch(race_id)
             failures = 0
+        except AccessDenied:  # アクセス拒否のあとは続けても無駄なので止める
+            raise
         except FetchError as exc:
             failures += 1
             progress(f"  {race_id}: {what}スキップ ({exc})")
@@ -360,7 +362,11 @@ def _collect_day(
         _fetch_each(unsettled, lambda rid: collect.collect_race(conn, fetcher, rid), "成績取得", progress)
     ids = db.race_ids_on(conn, day.isoformat())
     if odds:
-        _fetch_each(ids, lambda rid: collect.collect_odds(conn, fetcher, rid), "オッズ取得", progress)
+        def fetch_odds(rid: str) -> None:
+            if not collect.collect_odds(conn, fetcher, rid).get("market", True):
+                progress(f"  {rid}: オッズ未発売 (予想オッズは使いません)")
+
+        _fetch_each(ids, fetch_odds, "オッズ取得", progress)
     horse_ids = [r[0] for r in conn.execute(
         f"SELECT DISTINCT horse_id FROM entries WHERE race_id IN ({','.join('?' * len(ids))})", ids
     ).fetchall()] if ids else []

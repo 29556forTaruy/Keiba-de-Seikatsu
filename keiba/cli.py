@@ -138,7 +138,10 @@ def cmd_collect(settings: Settings, args: argparse.Namespace) -> None:
             ids += db.race_ids_on(conn, args.date.isoformat())
         for race_id in ids:
             parsed = collect.collect_odds(conn, fetcher, race_id)
-            print(f"{race_id}: {len(parsed['odds'])}頭 (状態 {parsed['status']}, {parsed['official_datetime']})")
+            if not parsed.get("market", True):
+                print(f"{race_id}: 未発売 (予想オッズのため保存しません)")
+            else:
+                print(f"{race_id}: {len(parsed['odds'])}頭 (状態 {parsed['status']}, {parsed['official_datetime']})")
     elif args.what == "pedigree":
         n = collect.collect_pedigrees(conn, fetcher, limit=args.limit)
         print(f"血統 {n}頭を保存しました")
@@ -163,7 +166,7 @@ def cmd_train(settings: Settings, args: argparse.Namespace) -> None:
     print(f"保存しました: {path}")
     print(f"  学習 {m['train_races']}レース / 検証 {m['valid_races']}レース / 反復 {m['iterations']}")
     if v:
-        print("  検証期間の精度 (対数損失は小さいほど良い):")
+        print("  検証期間の精度 (5分割の交差検証。対数損失は小さいほど良い):")
         print(f"    モデル単独 対数損失 {v['nll_model']:.3f}  本命的中 {v['top1_model']:.1%}")
         print(f"    オッズ     対数損失 {v['nll_market']:.3f}  本命的中 {v['top1_market']:.1%}")
         print(f"    ブレンド   対数損失 {v['nll_blend']:.3f}  本命的中 {v['top1_blend']:.1%}")

@@ -111,7 +111,7 @@ def race_brief(ctx: dict[str, Any]) -> dict[str, Any]:
     horses = []
     for h in ctx["horses"]:
         horses.append({
-            "馬番": h["number"], "枠": h["frame"], "馬名": h["horse_name"], "性齢": f"{h['sex']}{h['age']}",
+            "馬番": h["number"], "枠": h["frame"], "馬名": h["horse_name"], "性齢": h.get("sex_age"),
             "斤量": h["weight_carried"], "騎手": h["jockey_name"], "厩舎": h.get("trainer_name"),
             "馬体重": h.get("horse_weight"), "増減": h.get("weight_diff"),
             "父": h.get("sire"), "母父": h.get("damsire"),

@@ -107,6 +107,7 @@ def run_backtest(
             "回収率が実力以上に良く見えるので、start を検証期間より後にしてください。"
         )
     runs = F.load_runs(conn) if runs is None else runs
+    runs = runs[runs["is_future"] == 0]  # 未確定の出馬表は検証に使わず、近走の特徴量も乱すので除く
     feat = F.build_features(runs, bundle.baseline)
     rows = training_rows(feat)
     rows = rows[(rows["date"] >= start_ts) & (rows["date"] <= end_ts)]
