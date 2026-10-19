@@ -32,6 +32,12 @@ def _int(v: Any) -> int | None:
     return None if v is None else int(round(float(v)))
 
 
+def _sex_age(sex: Any, age: Any) -> str | None:
+    """性齢 (牡4). 片方が欠けていても「nan」「None」を混ぜない."""
+    sex, age = _clean(sex), _int(age)
+    return f"{sex or ''}{'' if age is None else age}" or None
+
+
 def record(rows: pd.DataFrame) -> dict[str, Any]:
     """着別度数 (1着-2着-3着-着外) と勝率・複勝率."""
     pos = rows["finish_pos"]
@@ -107,7 +113,7 @@ def past_runs(hist: pd.DataFrame, top2: dict[str, list[tuple[str, str]]], n: int
             "margin": _clean(r.get("margin")),
             "passing": _clean(r.get("passing")),
             "last3f": _clean(r.get("last3f")),
-            "jockey": r["jockey_name"],
+            "jockey": _clean(r["jockey_name"]),
             "weight_carried": _clean(r["weight_carried"]),
             "horse_weight": _int(r.get("horse_weight")),
             "weight_diff": _int(r.get("weight_diff")),
@@ -205,14 +211,15 @@ def same_race_history(feat: pd.DataFrame, race: dict[str, Any], date: pd.Timesta
     for _, r in past.sort_values("date", ascending=False).head(k).iterrows():
         out.append({
             "date": r["date"].strftime("%Y/%m/%d"),
-            "horse": r["horse_name"],
-            "sex_age": f"{r['sex']}{_int(r['age'])}",
-            "jockey": r["jockey_name"],
+            "horse": _clean(r["horse_name"]),
+            "sex_age": _sex_age(r["sex"], r["age"]),
+            "jockey": _clean(r["jockey_name"]),
             "popularity": _int(r["popularity"]),
             "odds": _clean(r["win_odds"]),
-            "frame": _clean(r["frame"]),
+            # 枠順前の出馬表が DB にあると frame 列全体が float (5.0) になるので整数に戻す
+            "frame": _int(r["frame"]),
             "time": _format_time(r["time_sec"]),
-            "going": r["going"],
+            "going": _clean(r["going"]),
             "style": running_style(_clean(r.get("first_pos")), _clean(r.get("passing"))),
         })
     return out

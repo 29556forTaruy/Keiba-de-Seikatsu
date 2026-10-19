@@ -21,7 +21,9 @@
 
 {% if analysis %}
 <section class="card analysis">
-  <h2>AI予想 <span class="note">（{{ analysis.worker }}）</span></h2>
+  <h2>AI予想 <span class="note">（{{ analysis.worker }}{% if analysis.created_at %} ・ {{ analysis.created_at | stamp }}作成{% endif %}）</span>
+    {% if analysis.stale %}<span class="badge">前回の予想（今回の作成に失敗）</span>{% endif %}</h2>
+  {% if analysis.stale %}<div class="warn">今回の実行では AI予想 を作れなかったため、{% if analysis.created_at %}{{ analysis.created_at | stamp }} に作った{% endif %}前回の予想を表示しています。その後のオッズや出馬表の変化は反映されていません。</div>{% endif %}
   {% set a = analysis.content %}
   {% if a.skip_reason %}<div class="warn">見送り推奨: {{ a.skip_reason }}</div>{% endif %}
   <p>{{ a.summary }}</p>
@@ -44,7 +46,7 @@
   </table></div>
   {% endif %}
   {% if a.risks %}<h3>不安材料</h3><ul>{% for r in a.risks %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
-  {% if review %}<h3>セカンドオピニオン <span class="note">（{{ review.worker }}）</span></h3><p style="white-space: pre-wrap">{{ review.content }}</p>{% endif %}
+  {% if review %}<h3>セカンドオピニオン <span class="note">（{{ review.worker }}{% if review.created_at %} ・ {{ review.created_at | stamp }}作成{% endif %}）</span></h3><p style="white-space: pre-wrap">{{ review.content }}</p>{% endif %}
 </section>
 {% endif %}
 
@@ -66,14 +68,16 @@
       <td class="num">{{ h.popularity or "-" }}</td>
       <td class="num">{{ h.p_place | pct }}</td>
       <td class="num">{{ h.p_market | pct }}</td>
-      <td>{{ h.sex }}{{ h.age }}</td>
+      <td>{{ h.sex_age or "" }}</td>
       <td class="num">{{ h.weight_carried | num1 }}</td>
-      <td>{{ h.jockey_name }}</td>
+      <td>{{ h.jockey_name or "未定" }}</td>
     </tr>
     {% endfor %}
   </table></div>
+  {% if not informative %}<p class="note">学習済みモデルもオッズもないため、全馬同じ勝率（1/頭数）です。勝率による印・本命・組み合わせは表示しません（<code>keiba train</code> で学習できます）。</p>{% endif %}
   {% if not numbered %}<p class="note">枠順(馬番)が未確定のため、推奨馬券と組み合わせは表示しません。</p>{% endif %}
   {% if not has_odds %}<p class="note">オッズ未取得のため、市場勝率・期待値は空欄です（<code>keiba collect odds {{ race.race_id }}</code>）。</p>{% endif %}
+  {% if no_odds %}<p class="note">{% if numbered %}馬番 {% endif %}{{ no_odds | join("・") }} のオッズがありません（出走取消の可能性があります）。この馬は推奨馬券の対象外で、勝率に市場の評価が入っていません。出馬表を取り直すと取消が反映されます（<code>keiba collect card {{ race.race_id }}</code>）。</p>{% endif %}
 </section>
 
 <section class="card">
@@ -87,9 +91,14 @@
       <td class="num">{{ b.odds | odds }}</td><td class="num">{{ "%.2f"|format(b.ev) }}</td><td class="num">{{ b.stake | yen }}</td></tr>
     {% endfor %}
   </table></div>
+  {% elif not numbered %}
+  <p>枠順(馬番)の確定後に表示します。</p>
+  {% elif not has_odds %}
+  <p>オッズ未取得のため期待値を計算できません。オッズ発売後に作り直してください（<code>keiba collect odds {{ race.race_id }}</code>）。</p>
   {% else %}
   <p>期待値が基準を超える単勝・複勝はありません。<b>見送り</b>も立派な選択です。</p>
   {% endif %}
+  {% if combos %}
   <h3>組み合わせの目安</h3>
   <p class="note">確率上位の組み合わせと「このオッズ以上なら期待値プラス」の目安（Harvilleモデルによる近似）。</p>
   <div class="grid2">
@@ -100,6 +109,7 @@
     </table></div>
     {% endfor %}
   </div>
+  {% endif %}
 </section>
 
 <section class="card">
@@ -110,7 +120,7 @@
       <span class="frame f{{ h.frame or 0 }}">{{ h.number or "-" }}</span>
       <span class="mark">{{ h.mark }}</span>
       <span class="name">{{ h.horse_name }}</span>
-      <span class="note">{{ h.sex }}{{ h.age }} ・ {{ h.weight_carried | num1 }}kg ・ {{ h.jockey_name }}{% if h.trainer_name %} ・ {{ h.trainer_name }}厩舎{% if h.trainer_region %}（{{ h.trainer_region }}）{% endif %}{% endif %}
+      <span class="note">{% if h.sex_age %}{{ h.sex_age }} ・ {% endif %}{% if h.weight_carried is not none %}{{ h.weight_carried | num1 }}kg ・ {% endif %}{{ h.jockey_name or "騎手未定" }}{% if h.trainer_name %} ・ {{ h.trainer_name }}厩舎{% if h.trainer_region %}（{{ h.trainer_region }}）{% endif %}{% endif %}
         {% if h.horse_weight %} ・ 馬体重 {{ h.horse_weight }}{% if h.weight_diff is not none %}({{ "%+d"|format(h.weight_diff) }}){% endif %}{% endif %}</span>
       {% if h.sire %}<span class="note">父 {{ h.sire }}{% if h.damsire %} ・ 母父 {{ h.damsire }}{% endif %}</span>{% endif %}
     </div>
@@ -190,8 +200,8 @@
   <div class="scroll"><table>
     <tr><th>日付</th><th>勝ち馬</th><th>性齢</th><th>騎手</th><th class="num">人気</th><th class="num">単勝</th><th>枠</th><th>脚質</th><th class="num">タイム</th><th>馬場</th></tr>
     {% for r in same_race %}
-    <tr><td>{{ r.date }}</td><td>{{ r.horse }}</td><td>{{ r.sex_age }}</td><td>{{ r.jockey }}</td><td class="num">{{ r.popularity }}</td>
-      <td class="num">{{ r.odds | odds }}</td><td><span class="frame f{{ r.frame }}">{{ r.frame }}</span></td><td>{{ r.style or "" }}</td><td class="num">{{ r.time or "" }}</td><td>{{ r.going }}</td></tr>
+    <tr><td>{{ r.date }}</td><td>{{ r.horse }}</td><td>{{ r.sex_age or "" }}</td><td>{{ r.jockey or "" }}</td><td class="num">{{ r.popularity or "-" }}</td>
+      <td class="num">{{ r.odds | odds }}</td><td><span class="frame f{{ r.frame or 0 }}">{{ r.frame or "-" }}</span></td><td>{{ r.style or "" }}</td><td class="num">{{ r.time or "" }}</td><td>{{ r.going }}</td></tr>
     {% endfor %}
   </table></div>
 </section>
@@ -199,7 +209,7 @@
 
 {% if news %}
 <section class="card">
-  <h2>直前情報 <span class="note">（{{ news.worker }} ・ {{ news.created_at }}）</span></h2>
+  <h2>直前情報 <span class="note">（{{ news.worker }} ・ {{ news.created_at | stamp }}）</span></h2>
   <div style="white-space: pre-wrap">{{ news.content }}</div>
   {% if news.sources %}
   <h3>出典</h3>

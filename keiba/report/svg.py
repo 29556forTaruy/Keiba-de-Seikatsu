@@ -49,22 +49,29 @@ def line_chart(
     height: int = 260,
     y_format: str = "yen",
     chart_id: str = "chart",
+    aria_label: str = "累積損益の推移",
+    include_zero: bool = True,
+    tip_labels: Sequence[str] | None = None,
 ) -> str:
     """複数系列の折れ線 (同じ単位のものだけ). series: [{name, values, slot}]
 
-    マウス位置に最も近いXを縦線で示し、全系列の値をツールチップに出す。
+    マウス位置 (スマホではタップ・なぞった位置) に最も近いXを縦線で示し、全系列の値をツールチップに出す。
+    y_format: "yen" (収支. ツールチップに符号を付ける) / "yen_abs" (資金などの金額) / "pct"
+    include_zero: 縦軸に 0 を必ず含める (収支向け。資金の推移では False)
+    tip_labels: ツールチップの見出し (横軸には描かない). 省略時は x_labels か「N件目」
     """
     series = [s for s in series if s["values"]]
     if not series:
         return ""
     n = max(len(s["values"]) for s in series)
     all_vals = [v for s in series for v in s["values"]]
-    lo, hi = min(all_vals + [0]), max(all_vals + [0])
+    base = [0] if include_zero else []
+    lo, hi = min(all_vals + base), max(all_vals + base)
     if hi == lo:
         hi = lo + 1
     span = hi - lo
     lo, hi = lo - span * 0.05, hi + span * 0.05
-    left, right, top, bottom = 64, 16, 12, 28
+    left, right, top, bottom = 72, 16, 12, 28
     pw, ph = width - left - right, height - top - bottom
 
     def x(i: float) -> float:
@@ -75,16 +82,18 @@ def line_chart(
 
     ticks = _nice_ticks(lo, hi, 5)
     parts = [
-        f'<svg class="chart" id="{chart_id}" viewBox="0 0 {width} {height}" role="img" aria-label="累積損益の推移">'
+        f'<svg class="chart" id="{chart_id}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(aria_label)}">'
     ]
     for t in ticks:
         cls = "axis" if t == 0 else "grid"
         parts.append(f'<line x1="{left}" x2="{width - right}" y1="{y(t):.1f}" y2="{y(t):.1f}" class="{cls}"/>')
-        parts.append(f'<text x="{left - 8}" y="{y(t) + 4:.1f}" class="tick" text-anchor="end">{_fmt(t, y_format)}</text>')
+        parts.append(f'<text x="{left - 8}" y="{y(t) + 4:.1f}" class="tick tick-y" text-anchor="end">{_fmt(t, y_format)}</text>')
+    x_gap = pw
     if x_labels:
         step = max(1, len(x_labels) // 6)
+        x_gap = step * pw / max(n - 1, 1)
         for i in range(0, len(x_labels), step):
-            parts.append(f'<text x="{x(i):.1f}" y="{height - 8}" class="tick" text-anchor="middle">{escape(str(x_labels[i]))}</text>')
+            parts.append(f'<text x="{x(i):.1f}" y="{height - 8}" class="tick tick-x" text-anchor="middle">{escape(str(x_labels[i]))}</text>')
     for s in series:
         d = " ".join(f"{'M' if i == 0 else 'L'}{x(i):.1f},{y(v):.1f}" for i, v in enumerate(s["values"]))
         parts.append(f'<path d="{d}" class="line" style="stroke: var(--series-{s.get("slot", 1)})"/>')
@@ -96,9 +105,10 @@ def line_chart(
     parts.append(f'<line class="crosshair" x1="0" x2="0" y1="{top}" y2="{top + ph}" visibility="hidden"/>')
     parts.append(f'<rect class="hit" x="{left}" y="{top}" width="{pw}" height="{ph}" fill="transparent"/>')
     parts.append("</svg>")
+    labels = tip_labels or x_labels
     payload = {
-        "n": n, "left": left, "pw": pw, "width": width, "format": y_format,
-        "labels": list(x_labels) if x_labels else None,
+        "n": n, "left": left, "pw": pw, "width": width, "format": y_format, "x_gap": x_gap,
+        "labels": [str(v) for v in labels] if labels else None,
         "series": [{"name": s["name"], "slot": s.get("slot", 1), "values": s["values"]} for s in series],
     }
     data = escape(json.dumps(payload, ensure_ascii=False), quote=True)
@@ -106,17 +116,22 @@ def line_chart(
 
 
 def _fmt(v: float, kind: str) -> str:
-    if kind == "yen":
+    """目盛りの文字. 2.5万 のような端数は丸めずに出す (丸めると隣の目盛りと同じ文字になる)."""
+    if abs(v) < 1e-9:
+        return "0"
+    if kind in ("yen", "yen_abs"):
         a = abs(v)
         sign = "-" if v < 0 else ""
+        if a >= 100_000_000:
+            return f"{sign}{a / 100_000_000:.10g}億"
         if a >= 10_000:
-            return f"{sign}{a / 10_000:.0f}万"
+            return f"{sign}{a / 10_000:.10g}万"
         if a >= 1000:
-            return f"{sign}{a / 1000:.0f}千"
-        return f"{v:.0f}"
+            return f"{sign}{a / 1000:.10g}千"
+        return f"{v:.10g}"
     if kind == "pct":
-        return f"{v:.0%}"
-    return f"{v:g}"
+        return f"{v * 100:.10g}%"
+    return f"{v:.10g}"
 
 
 def _nice_ticks(lo: float, hi: float, count: int) -> list[float]:
@@ -135,6 +150,8 @@ def _nice_ticks(lo: float, hi: float, count: int) -> list[float]:
 
 
 # 折れ線のツールチップ (値は textContent で入れる)
+# スマホ: タップ・なぞりで表示し、指を離しても消さない (グラフの外をタップで消す)。
+# viewBox ごと縮むと目盛りが 5px ほどになるので、画面上で約 11px になるよう拡大する。
 CHART_JS = """
 document.querySelectorAll('.chart-wrap').forEach(function (wrap) {
   var cfg = JSON.parse(wrap.dataset.chart);
@@ -144,8 +161,23 @@ document.querySelectorAll('.chart-wrap').forEach(function (wrap) {
   var tip = wrap.querySelector('.tooltip');
   function fmt(v) {
     if (cfg.format === 'yen') return (v >= 0 ? '+' : '') + Math.round(v).toLocaleString('ja-JP') + '円';
+    if (cfg.format === 'yen_abs') return Math.round(v).toLocaleString('ja-JP') + '円';
     if (cfg.format === 'pct') return (v * 100).toFixed(1) + '%';
     return String(v);
+  }
+  function fitTicks(nodes, room, size) {
+    if (!nodes.length) return;
+    nodes.forEach(function (t) { t.style.fontSize = size + 'px'; });
+    var widest = 0;
+    nodes.forEach(function (t) { widest = Math.max(widest, t.getComputedTextLength()); });
+    if (widest > room) nodes.forEach(function (t) { t.style.fontSize = (size * room / widest) + 'px'; });
+  }
+  function fit() {
+    var w = svg.getBoundingClientRect().width;
+    if (!w) return;
+    var size = 11 * Math.max(1, cfg.width / w);
+    fitTicks(svg.querySelectorAll('.tick-y'), cfg.left - 12, size);
+    fitTicks(svg.querySelectorAll('.tick-x'), cfg.x_gap * 0.9, size);
   }
   function show(evt) {
     var box = svg.getBoundingClientRect();
@@ -177,7 +209,11 @@ document.querySelectorAll('.chart-wrap').forEach(function (wrap) {
     tip.style.top = '8px';
   }
   function hide() { cross.setAttribute('visibility', 'hidden'); tip.hidden = true; }
+  hit.addEventListener('pointerdown', show);
   hit.addEventListener('pointermove', show);
-  hit.addEventListener('pointerleave', hide);
+  hit.addEventListener('pointerleave', function (e) { if (e.pointerType === 'mouse') hide(); });
+  document.addEventListener('pointerdown', function (e) { if (e.pointerType !== 'mouse' && !wrap.contains(e.target)) hide(); });
+  fit();
+  window.addEventListener('resize', fit);
 });
 """

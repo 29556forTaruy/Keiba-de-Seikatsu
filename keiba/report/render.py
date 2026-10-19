@@ -58,16 +58,32 @@ def _safe_url(v: Any) -> str:
     return s if s.startswith(("https://", "http://")) else "#"
 
 
+def _stamp(v: Any) -> str:
+    """DBの作成日時 (2024-03-02T09:15:30) → 2024-03-02 09:15"""
+    if _missing(v) or not str(v):
+        return ""
+    try:
+        return pd.Timestamp(str(v)).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return str(v)
+
+
+def _blank(v: Any) -> Any:
+    # 値のない欄 (None / NaN) を「None」「nan」と出さない
+    return "" if _missing(v) else v
+
+
 def environment() -> Environment:
     env = Environment(
         loader=PackageLoader("keiba.report", "templates"),
         autoescape=select_autoescape(["html", "j2"]),
         trim_blocks=True,
         lstrip_blocks=True,
+        finalize=_blank,
     )
     env.filters.update(
         pct=_pct, pct0=_pct0, odds=_odds, yen=_yen, signed_yen=_signed_yen,
-        num0=_num(".0f"), num1=_num(".1f"), safe_url=_safe_url,
+        num0=_num(".0f"), num1=_num(".1f"), safe_url=_safe_url, stamp=_stamp,
     )
     env.globals.update(app_version=__version__, chart_js=CHART_JS)
     return env
@@ -84,8 +100,20 @@ def _write(path: Path, html: str) -> Path:
     return path
 
 
+def informative(pred: pd.DataFrame) -> bool:
+    """勝率に意味があるか. モデル未学習かつオッズ未取得だと全馬均等 (1/頭数) で、
+    その並びは馬番順にすぎないので印・本命・組み合わせに使わない."""
+    p = pred["p_win"].dropna()
+    if p.empty or p.max() - p.min() < 1e-12:
+        return False
+    sources = [c for c in ("p_model", "p_market") if c in pred.columns]
+    return not sources or any(pred[c].notna().any() for c in sources)
+
+
 def default_marks(pred: pd.DataFrame, min_ev: float) -> dict[int, str]:
-    """予想勝率の順に ◎○▲△△、それ以外で期待値が高い馬に ☆ (馬番確定前は印なし)."""
+    """予想勝率の順に ◎○▲△△、それ以外で期待値が高い馬に ☆ (馬番確定前・勝率が均等なときは印なし)."""
+    if not informative(pred):
+        return {}
     pred = pred[pred["number"].notna()]
     order = pred.sort_values("p_win", ascending=False)["number"].astype(int).tolist()
     marks = {}
@@ -137,13 +165,14 @@ def race_context(
             "frame": stats._int(r["frame"]),
             "horse_id": r["horse_id"],
             "anchor": f"h{stats._int(r['number'])}" if not _missing(r["number"]) else f"id{r['horse_id']}",
-            "horse_name": r["horse_name"],
-            "sex": r["sex"],
+            "horse_name": stats._clean(r["horse_name"]),
+            "sex": stats._clean(r["sex"]),
             "age": stats._int(r["age"]),
+            "sex_age": stats._sex_age(r["sex"], r["age"]),
             "weight_carried": stats._clean(r["weight_carried"]),
-            "jockey_name": r["jockey_name"],
-            "trainer_name": r.get("trainer_name"),
-            "trainer_region": r.get("trainer_region"),
+            "jockey_name": stats._clean(r["jockey_name"]),
+            "trainer_name": stats._clean(r.get("trainer_name")),
+            "trainer_region": stats._clean(r.get("trainer_region")),
             "horse_weight": stats._int(r.get("horse_weight")),
             "weight_diff": stats._int(r.get("weight_diff")),
             "sire": stats._clean(r.get("sire")),
@@ -167,20 +196,27 @@ def race_context(
         })
 
     numbered = all(h["number"] is not None for h in horses)
+    has_signal = informative(pred)
+    has_odds = any(h["win_odds"] for h in horses)
+    # 一部の馬だけオッズがない (出走取消を出馬表に反映する前など). その馬は推奨馬券の対象外
+    no_odds = [h["number"] or h["horse_name"] for h in horses if not h["win_odds"]] if has_odds else []
     # 馬番が確定する前 (枠順発表前) は馬券の組番を作れない
     bets = suggest_bets(horses, **betting) if numbered else []
     probs = [h["p_win"] or 0 for h in horses]
     numbers = [h["number"] for h in horses]
     combos = {}
-    if numbered and len(horses) >= 3 and sum(probs) > 0:
+    if numbered and has_signal and len(horses) >= 3 and sum(probs) > 0:
         combos = {bt: top_combos(probs, numbers, bt, k=5, min_ev=min_ev) for bt in ("馬連", "ワイド", "三連複")}
     return {
         "race": race,
         "horses": horses,
-        "horses_by_prob": sorted(horses, key=lambda h: -(h["p_win"] or 0)),
+        # 勝率が均等なときは並べ替えず馬番順のまま
+        "horses_by_prob": sorted(horses, key=lambda h: -(h["p_win"] or 0)) if has_signal else horses,
         "max_p": max([h["p_win"] or 0 for h in horses] + [1e-9]),
         "names": {h["number"]: h["horse_name"] for h in horses},
-        "has_odds": any(h["win_odds"] for h in horses),
+        "has_odds": has_odds,
+        "no_odds": no_odds,
+        "informative": has_signal,
         "numbered": numbered,
         "bets": bets,
         "combos": combos,
@@ -227,8 +263,13 @@ def render_backtest(bt: dict[str, Any], path: Path, *, test_metrics: dict[str, A
     html = environment().get_template("backtest.html.j2").render(
         bt=bt,
         flat_series=flat_series,
-        flat_chart=line_chart(flat_series, chart_id="flat"),
-        equity_chart=line_chart([{"name": "資金", "values": bt["equity"], "slot": 1}], chart_id="equity"),
+        flat_chart=line_chart(flat_series, chart_id="flat", aria_label="累積収支の推移（100円均一の戦略）"),
+        # equity[0] は最初のレース前の初期資金. 資金は損益ではないので符号を付けず、縦軸に 0 も入れない
+        equity_chart=line_chart(
+            [{"name": "資金", "values": bt["equity"], "slot": 1}], chart_id="equity", y_format="yen_abs",
+            include_zero=False, aria_label="ケリー資金管理の資金推移",
+            tip_labels=["開始"] + [f"{i}レース後" for i in range(1, len(bt["equity"]))],
+        ),
         monthly=monthly,
         months=months,
         test_metrics=test_metrics,
@@ -244,15 +285,21 @@ def _now() -> str:
 
 def summarize_for_index(ctx: dict[str, Any], href: str) -> dict[str, Any]:
     race = ctx["race"]
-    top = ctx["horses_by_prob"][0] if ctx["horses_by_prob"] else None
+    # 勝率が均等 (モデルもオッズもない) なら本命は空欄
+    top = ctx["horses_by_prob"][0] if ctx["horses_by_prob"] and ctx.get("informative", True) else None
     analysis = ctx.get("analysis")
-    conf = analysis["content"].get("confidence") if analysis else None
+    conf = analysis["content"].get("confidence") if analysis and isinstance(analysis.get("content"), dict) else None
+    label = f"自信度{conf}" if conf else ("あり" if analysis else "")
+    if analysis and analysis.get("stale"):
+        label += "（前回）"
     return {
         "venue": race["venue"], "race_num": race["race_num"], "race_name": race.get("race_name"),
         "race_class": race.get("race_class"), "grade": race.get("grade"), "surface": race.get("surface"),
         "distance": race.get("distance"), "field_size": len(ctx["horses"]), "start_time": race.get("start_time"),
         "href": href, "top": top, "bets": len(ctx["bets"]), "stake": sum(b["stake"] for b in ctx["bets"]),
-        "analysis": f"自信度{conf}" if conf else ("あり" if analysis else ""),
+        # 推奨が 0 点のとき、見送り (期待値が基準未満) か、そもそも計算できないのかを区別する
+        "numbered": ctx.get("numbered", True), "has_odds": ctx.get("has_odds", True),
+        "analysis": label,
     }
 
 

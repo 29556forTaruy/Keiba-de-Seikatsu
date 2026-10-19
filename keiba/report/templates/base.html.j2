@@ -83,6 +83,8 @@
   --rank-ink: #f0efec;
 }
 * { box-sizing: border-box; }
+/* ボタンなどのフォーム部品は font を継承しないので、日本語フォントの指定を引き継がせる */
+button, input, select, textarea { font: inherit; }
 html {
   /* 日本語フォントのみ指定 (中国語フォントへのフォールバックを避ける) */
   font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", YuGothic, Meiryo, "Noto Sans JP", "IPAexGothic", "IPAGothic", sans-serif;
@@ -138,7 +140,8 @@ tr:hover td { background: var(--wash); }
 .spark .dot { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
 .spark .grid { stroke: var(--grid); stroke-width: 1; }
 .chart-wrap { position: relative; }
-.chart { width: 100%; height: auto; display: block; }
+/* 横になぞるとツールチップ、縦は通常のスクロール (rect ではなく svg に付けないと効かない) */
+.chart { width: 100%; height: auto; display: block; touch-action: pan-y; }
 .chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart .dot { stroke: var(--surface); stroke-width: 2; }
 .chart .grid { stroke: var(--grid); stroke-width: 1; }
