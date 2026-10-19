@@ -101,6 +101,16 @@ def id_from_href(href: str | None, kind: str) -> str | None:
     return m.group(1) if m else None
 
 
+_COURSE_DETAIL = re.compile(r"(外-内|内-外|外内|内外|内2周|外2周|2周|外|内)")
+# race.netkeiba の出馬表は「馬場:稍」「馬場:不」と略すので、結果ページと同じ表記にそろえる
+_GOING = r"(良|稍重?|重|不良?)"
+_GOING_FULL = {"稍": "稍重", "不": "不良"}
+
+
+def _going(m: re.Match | None) -> str | None:
+    return _GOING_FULL.get(m.group(1), m.group(1)) if m else None
+
+
 def parse_course(text: str) -> dict[str, Any]:
     """'芝左2000m' / 'ダ右1800m' / '芝右 外1600m' / '障芝3000m' / '芝右 内2周3600m' / '障芝 外-内4250m' を分解する."""
     text = norm(text)
@@ -116,7 +126,7 @@ def parse_course(text: str) -> dict[str, Any]:
     direction = re.search(r"(右|左|直線|直)", between)
     if direction:
         out["direction"] = "直線" if direction.group(1).startswith("直") else direction.group(1)
-    detail = re.search(r"(外-内|内-外|外内|内外|内2周|外2周|2周|外|内)", between)
+    detail = _COURSE_DETAIL.search(between)
     out["course_detail"] = detail.group(1) if detail else None
     return out
 
@@ -263,8 +273,7 @@ def parse_race_result(html: str, race_id: str) -> dict[str, Any]:
     race.update(parse_course(info))
     m = re.search(r"天候\s*:\s*(\S+)", info)
     race["weather"] = m.group(1) if m else None
-    m = re.search(r"(?:芝|ダート|ダ)\s*:\s*(良|稍重|重|不良)", info)
-    race["going"] = m.group(1) if m else None
+    race["going"] = _going(re.search(r"(?:芝|ダート|ダ)\s*:\s*" + _GOING, info))
     m = re.search(r"発走\s*:\s*(\d{1,2}:\d{2})", info)
     race["start_time"] = m.group(1) if m else None
 
@@ -323,7 +332,11 @@ def parse_race_result(html: str, race_id: str) -> dict[str, Any]:
     if not results:
         raise ParseError(f"出走馬が0頭です: {race_id}")
     race["field_size"] = sum(1 for r in results if r["finish_status"] not in ("取消", "除外"))
-    return {"race": race, "results": results, "payouts": parse_payouts(soup, race_id)}
+    payouts = parse_payouts(soup, race_id)
+    if any(r["finish_pos"] == 1 for r in results) and not any(p["bet_type"] == "単勝" for p in payouts):
+        # 払戻なしで保存するとバックテストで的中が外れ扱いになるので、取り直せるよう失敗にする
+        raise ParseError(f"単勝の払戻が読み取れません: {race_id}")
+    return {"race": race, "results": results, "payouts": payouts}
 
 
 def normalize_bet_type(text: str) -> str | None:
@@ -406,13 +419,16 @@ def parse_shutuba(html: str, race_id: str, date: str | None = None) -> dict[str,
     m = re.search(r"(障|芝|ダ)\D{0,3}?(\d{3,4})\s*m", data1)
     race["surface"] = m.group(1) if m else None
     race["distance"] = int(m.group(2)) if m else None
-    m = re.search(r"\(\s*(右|左|直線|直)\s*(外|内)?", data1)
-    race["direction"] = ("直線" if m.group(1).startswith("直") else m.group(1)) if m else None
-    race["course_detail"] = m.group(2) if m else None
+    # '(右)' '(右 内2周)' '(右 外-内)' のかっこ内から、結果ページ (parse_course) と同じ表記で取り出す
+    m = re.search(r"\(([^)]*)\)", data1)
+    inner = m.group(1) if m else ""
+    direction = re.search(r"(右|左|直線|直)", inner)
+    race["direction"] = ("直線" if direction.group(1).startswith("直") else direction.group(1)) if direction else None
+    detail = _COURSE_DETAIL.search(inner)
+    race["course_detail"] = detail.group(1) if detail else None
     m = re.search(r"天候\s*:\s*([^\s/]+)", data1)
     race["weather"] = m.group(1) if m else None
-    m = re.search(r"馬場\s*:\s*(良|稍重|重|不良)", data1)
-    race["going"] = m.group(1) if m else None
+    race["going"] = _going(re.search(r"馬場\s*:\s*" + _GOING, data1))
     m = re.search(r"(\d{1,2}:\d{2})\s*発走", data1)
     race["start_time"] = m.group(1) if m else None
 
@@ -474,7 +490,11 @@ def _odds_value(value: Any) -> float | None:
 
 
 def parse_odds_json(text: str, race_id: str) -> dict[str, Any]:
-    """api_get_jra_odds.html (type=1) のJSON → 単勝・複勝オッズ."""
+    """api_get_jra_odds.html (type=1) のJSON → 単勝・複勝オッズ.
+
+    status が 'yoso' のときは発売前の予想オッズなので market=False にする
+    (実際に買えるオッズではないため、期待値や p_market に使ってはいけない)。
+    """
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -495,7 +515,13 @@ def parse_odds_json(text: str, race_id: str) -> dict[str, Any]:
             "place_odds_max": _odds_value(p[1]) if len(p) > 1 else None,
             "popularity": to_int(str(w[2])) if len(w) > 2 and w[2] else None,
         })
-    return {"status": payload.get("status"), "official_datetime": data.get("official_datetime"), "odds": rows}
+    status = payload.get("status")
+    return {
+        "status": status,
+        "market": status != "yoso",
+        "official_datetime": data.get("official_datetime"),
+        "odds": rows,
+    }
 
 
 # ---------------------------------------------------------------- 血統 (db.netkeiba.com/horse/ped/{id}/)
