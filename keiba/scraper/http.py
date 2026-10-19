@@ -24,6 +24,9 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# パースできなかったページの置き場 (cache_dir の下. サイト名のフォルダと重ならない名前)
+FAILED_DIR = "_failed"
+
 _META_CHARSET = re.compile(rb"""<meta[^>]+charset=["']?([A-Za-z0-9_\-]+)""", re.I)
 
 
@@ -174,8 +177,26 @@ class Fetcher:
         return self.cache_dir / parsed.netloc / f"{slug}_{digest}.html.gz"
 
     def invalidate(self, url: str) -> None:
-        """パースできなかったページ (開催前の結果ページなど) のキャッシュを消す."""
+        """中身の無いページ (開催前の結果ページなど) のキャッシュを消す."""
         self.cache_path(url).unlink(missing_ok=True)
+
+    def keep_failed(self, url: str) -> Path | None:
+        """パースできなかったページを data/raw/_failed/ に移す. 移した先を返す.
+
+        次回は取り直し、取ったページはパーサーを直す材料として残す (同じページの前回分は上書き)。
+        """
+        src = self.cache_path(url)
+        if not src.exists():
+            return None
+        dst = self.cache_dir / FAILED_DIR / src.relative_to(self.cache_dir)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst)
+        except OSError as exc:
+            log.warning("パースできなかったページを残せません (%s) %s", exc, dst)
+            src.unlink(missing_ok=True)
+            return None
+        return dst
 
     def _wait(self) -> None:
         elapsed = time.monotonic() - self._last_request

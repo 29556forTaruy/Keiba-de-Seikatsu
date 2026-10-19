@@ -22,13 +22,21 @@ def _jst_midnight(day: date) -> float:
 
 
 def _parse(fetcher: Fetcher, url: str, parse, *args, live: bool = False, refresh: bool = False, **kwargs):
-    """取得してパース。パースに失敗したらキャッシュを捨てて、次回は取り直す."""
+    """取得してパース。パースに失敗したら次回は取り直す.
+
+    中身の無いページ (RaceNotFound) は捨て、それ以外はパーサーを直す材料として data/raw/_failed/ に残す。
+    """
     html = fetcher.get(url, live=live, refresh=refresh)
     try:
         return parse(html, *args, **kwargs)
-    except parsers.ParseError:
+    except parsers.RaceNotFound:
         fetcher.invalidate(url)
         raise
+    except parsers.ParseError as exc:
+        kept = fetcher.keep_failed(url)
+        if kept is None:
+            raise
+        raise type(exc)(f"{exc} (取得したページ: {kept})") from exc
 
 
 def _months(start: date, end: date) -> Iterable[tuple[int, int]]:
@@ -50,9 +58,9 @@ def kaisai_dates(fetcher: Fetcher, start: date, end: date, *, refresh: bool = Fa
                            stale_before=_jst_midnight(next_month + timedelta(days=7)))
         found = [date(int(s[:4]), int(s[4:6]), int(s[6:])) for s in parsers.extract_kaisai_dates(html)]
         if not found:
-            # カレンダーが読めなければ土日を総当たりする (キャッシュは捨てて次回また読む)
-            fetcher.invalidate(url)
-            log.warning("%d年%d月のカレンダーが読めないため土日を総当たりします", y, m)
+            # カレンダーが読めなければ土日を総当たりする (ページは _failed/ に移して次回また読む)
+            kept = fetcher.keep_failed(url)
+            log.warning("%d年%d月のカレンダーが読めないため土日を総当たりします (取得したページ: %s)", y, m, kept)
             d = date(y, m, 1)
             while d.month == m:
                 if d.weekday() >= 5:
