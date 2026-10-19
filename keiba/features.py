@@ -84,33 +84,84 @@ def load_runs(conn: sqlite3.Connection) -> pd.DataFrame:
 
 @dataclass
 class SpeedBaseline:
-    """走破タイムを (競馬場, 芝ダ, 距離, 馬場) ごとの平均・標準偏差で偏差値化する.
+    """走破タイムを、コースと馬場から決めた基準タイムに対する偏差値にする.
 
+    基準タイム = コース (競馬場, 芝ダ, 距離) の基準 × 馬場係数 (芝ダ, 馬場, 距離帯)。
+    馬場係数は全コースをまとめて推定するので、重・不良の少ないコースでも良馬場の平均とは比べない。
+    標準偏差はコースごとの、馬場の差を除いた残差のばらつき。
+    (競馬場, 芝ダ, 距離, 馬場) の実測の平均・標準偏差は、件数 n に応じて n/(n+k) の重みで
+    この基準に寄せる (件数がしきい値をまたいでも指数が跳ばない)。
     学習期間のデータだけで fit し、テスト期間や予想には transform だけを使う。
     """
 
     min_count: int = 30
-    tables: list[tuple[list[str], pd.DataFrame]] = field(default_factory=list)
+    shrink_k: float = 30.0
+    course: list[tuple[list[str], pd.DataFrame]] = field(default_factory=list)
+    going: list[tuple[list[str], pd.DataFrame]] = field(default_factory=list)
+    cells: pd.DataFrame | None = None
 
-    LEVELS = (
-        ["venue", "surface", "distance", "going"],
-        ["venue", "surface", "distance"],
-        ["surface", "distance"],
-    )
+    CELL = ["venue", "surface", "distance", "going"]
+    # コースの基準 (件数が足りなければ競馬場をまとめる) と馬場係数 (同じく距離帯をまとめる)
+    COURSE_LEVELS = (["venue", "surface", "distance"], ["surface", "distance"])
+    GOING_LEVELS = (["surface", "going", "band"], ["surface", "going"])
 
     def fit(self, df: pd.DataFrame) -> "SpeedBaseline":
-        ok = df[df["time_sec"].notna() & df["finish_pos"].notna()]
-        self.tables = []
-        for keys in self.LEVELS:
-            g = ok.groupby(keys)["time_sec"].agg(["mean", "std", "count"]).reset_index()
-            g = g[(g["count"] >= self.min_count) & (g["std"] > 0)]
-            self.tables.append((list(keys), g.rename(columns={"mean": "_mu", "std": "_sd"})[keys + ["_mu", "_sd"]]))
+        ok = df[df["time_sec"].notna() & df["finish_pos"].notna()].dropna(subset=["venue", "surface", "distance"])
+        ok = ok[self.CELL + ["time_sec"]].assign(band=ok["distance"].map(distance_band))
+        t = ok["time_sec"]
+        # コース基準と馬場係数を交互に当てはめる (コースごとの馬場の偏りが基準に混ざらないように)
+        r = pd.Series(1.0, index=ok.index)
+        for _ in range(10):
+            base = (t / r).groupby([ok[k] for k in self.COURSE_LEVELS[0]]).transform("mean")
+            r = (t / base).groupby([ok[k] for k in self.GOING_LEVELS[0]]).transform("mean").fillna(1.0)
+        ok["_x"] = t / r  # 馬場の影響を除いたタイム
+        self.course = []
+        for keys in self.COURSE_LEVELS:
+            # 標準偏差は馬場の差を除いた残差から取る (馬場をまぜた標準偏差は大きく出る)
+            mu = ok.groupby(keys)["_x"].transform("mean")
+            g = ok.assign(_e=t - mu * r).groupby(keys).agg(
+                _mu=("_x", "mean"), _sd=("_e", "std"), _n=("_x", "size")).reset_index()
+            g = g[(g["_n"] >= self.min_count) & (g["_sd"] > 0)]
+            self.course.append((list(keys), g[keys + ["_mu", "_sd"]]))
+        ok["_ratio"] = t / base
+        self.going = []
+        for keys in self.GOING_LEVELS:
+            g = ok.groupby(keys)["_ratio"].agg(_r="mean", _n="size").reset_index()
+            self.going.append((list(keys), g.loc[g["_n"] >= self.min_count, keys + ["_r"]]))
+        self.cells = ok.groupby(self.CELL)["time_sec"].agg(_m="mean", _csd="std", _n="size").reset_index()
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.Series:
+        if self.cells is None:
+            return self._transform_legacy(df)
+        key = df[self.CELL].assign(band=df["distance"].map(distance_band))
+        base = self._lookup(key, self.course, ["_mu", "_sd"])
+        mu0 = base["_mu"] * self._lookup(key, self.going, ["_r"])["_r"].fillna(1.0)
+        sd0 = base["_sd"]
+        # 実測の (競馬場, 芝ダ, 距離, 馬場) は件数に応じて混ぜる
+        cell = key[self.CELL].merge(self.cells, on=self.CELL, how="left")
+        cell.index = df.index
+        n = cell["_n"].fillna(0)
+        w = n / (n + self.shrink_k)
+        mu = mu0 + w * (cell["_m"] - mu0).fillna(0)
+        sd = sd0 + w * (cell["_csd"] - sd0).fillna(0)
+        fig = 50 + 10 * (mu - df["time_sec"]) / sd
+        return fig.clip(0, 100)
+
+    @staticmethod
+    def _lookup(key: pd.DataFrame, levels: list[tuple[list[str], pd.DataFrame]], cols: list[str]) -> pd.DataFrame:
+        out = pd.DataFrame(np.nan, index=key.index, columns=cols)
+        for keys, table in levels:
+            merged = key[keys].merge(table, on=keys, how="left")
+            merged.index = key.index
+            out = out.fillna(merged[cols])
+        return out
+
+    def _transform_legacy(self, df: pd.DataFrame) -> pd.Series:
+        """旧形式 (階層ごとの平均・標準偏差) で保存されたモデル用. 学習時と同じ指数を返す."""
         mu = pd.Series(np.nan, index=df.index)
         sd = pd.Series(np.nan, index=df.index)
-        for keys, table in self.tables:
+        for keys, table in self.__dict__.get("tables", []):
             merged = df[keys].merge(table, on=keys, how="left")
             merged.index = df.index
             mu = mu.fillna(merged["_mu"])
@@ -180,9 +231,11 @@ PRIOR_WIN, PRIOR_TOP3 = 0.072, 0.215
 REL_COLS = ["h_best5_fig", "h_mean3_fig", "h_last_fig", "h_mean3_fin", "h_win_rate", "j_win", "h_prize_log",
             "weight_carried", "h_style"]
 
+# 当日の馬体重 (horse_weight / weight_diff) は発走約70分前まで出ないので使わない。
+# 学習時は必ずあるのに前日の予想では欠ける、という食い違いを避けるため前走の馬体重を使う
 FEATURES = [
     "distance", "field_size", "class_level", "venue", "surface", "going",
-    "frame", "number_ratio", "weight_carried", "age", "sex", "horse_weight", "weight_diff",
+    "frame", "number_ratio", "weight_carried", "age", "sex", "h_last_weight",
     "h_n_runs", "h_days_since", "h_last_fin", "h_mean3_fin", "h_mean5_fin",
     "h_last_fig", "h_mean3_fig", "h_best5_fig", "h_last_behind", "h_mean3_behind",
     "h_mean5_l3f", "h_style", "h_win_rate", "h_top3_rate", "h_dist_change", "h_class_change",
@@ -230,6 +283,7 @@ def build_features(df: pd.DataFrame, baseline: SpeedBaseline) -> pd.DataFrame:
     df["h_dist_change"] = df["distance"] - h["distance"].shift()
     df["h_class_change"] = df["class_level"] - h["class_level"].shift()
     df["h_last_pop"] = h["popularity"].shift() / h["field_size"].shift().clip(lower=2)
+    df["h_last_weight"] = h["horse_weight"].shift()
     df["h_prize_log"] = np.log1p(_exclusive_cumsum(df, "horse_id", "prize").clip(lower=0))
     for name, keys in (("surf", ["horse_id", "surface"]), ("band", ["horse_id", "band"]),
                        ("venue", ["horse_id", "venue"])):
@@ -269,10 +323,12 @@ def build_features(df: pd.DataFrame, baseline: SpeedBaseline) -> pd.DataFrame:
     return df
 
 
-def model_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    X = df[FEATURES].copy()
+def model_matrix(df: pd.DataFrame, features: list[str] | None = None) -> pd.DataFrame:
+    """モデルの入力. features は学習時の列 (保存済みモデルは自分の列を渡す)."""
+    X = df[features or FEATURES].copy()
     for col, cats in CATEGORIES.items():
-        X[col] = pd.Categorical(X[col], categories=cats)
+        if col in X:
+            X[col] = pd.Categorical(X[col], categories=cats)
     for col in X.columns:
         if col not in CATEGORIES:
             X[col] = pd.to_numeric(X[col], errors="coerce").astype(float)
