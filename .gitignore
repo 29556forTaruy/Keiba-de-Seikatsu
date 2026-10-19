@@ -12,3 +12,6 @@ reports/
 # APIキーなどを書く個人設定
 config.toml
 .env
+
+# 作業エージェントの一時的な作業ツリー
+.claude/worktrees/
