@@ -3,23 +3,30 @@
 APIキーなしで、各社の定額プランの範囲で動かせる。プロンプトは標準入力で渡す。
 プロンプトにはWeb由来の文章が含まれうる。CLIは空の一時ディレクトリで起動するので
 プロジェクトのファイルを書き換えることはないが、それだけでは手元のファイルの読み取りは防げない。
-既定のコマンドでは Claude Code のツールを Web 検索だけに絞っている。Codex の read-only
+既定のコマンドでは Claude Code のツールを Web 検索だけに絞り、MCP サーバーも読み込まない。Codex の read-only
 サンドボックスは書き込みと通信を止めるだけで、ユーザーが読めるファイルは読める (README 参照)。
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any
 
 from keiba.llm.base import WorkerError, WorkerResult, dedupe_sources, extract_json
 
+log = logging.getLogger(__name__)
+
 # 本文中のURL. 日本語の文では「（URL）、」のように全角の括弧・句読点がすぐ後に続くので、そこで切る
-URL_RE = re.compile(r"https?://[^\s<>\"'()\[\]（）「」『』【】〔〕＜＞、。，．！？…]+")
+# 括弧は1段だけ対になったものを許す (wiki の「_(競走馬)」など)。バッククォートとひらがな (「によると」などの助詞) でも切る
+_URL_CH = r"[^\s<>\"'`()\[\]（）「」『』【】〔〕＜＞、。，．！？…\u3040-\u309f]"
+URL_RE = re.compile(rf"https?://(?:{_URL_CH}|\({_URL_CH}*\))+")
 
 
 def find_urls(text: str) -> list[str]:
@@ -27,12 +34,25 @@ def find_urls(text: str) -> list[str]:
 
 
 class CLIWorker:
-    def __init__(self, name: str, command: list[str], *, timeout: float = 600) -> None:
+    def __init__(self, name: str, command: list[str], *, timeout: float = 600, keep_api_key: bool = False) -> None:
         if not command:
             raise WorkerError(f"{name} のコマンドが設定されていません (config.toml の [cli])")
         self.name = name
         self.command = list(command)
         self.timeout = timeout
+        self.keep_api_key = keep_api_key
+        if self._is_claude() and "--tools" not in self.command:
+            log.warning("%s のコマンドにツール制限 (--tools) がありません。Web由来の文章を読ませるので、"
+                        "config.example.toml の既定値に戻すことをすすめます", name)
+
+    def _is_claude(self) -> bool:
+        return self.name == "claude_cli" or Path(self.command[0]).name.lower().startswith("claude")
+
+    def _env(self) -> dict[str, str] | None:
+        """claude には API キーを渡さない (渡すとサブスクではなくAPIの従量課金で動く)."""
+        if not self._is_claude() or self.keep_api_key:
+            return None
+        return {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
 
     def build_prompt(self, prompt: str, system: str | None, schema: dict[str, Any] | None, web_search: bool) -> str:
         parts = []
@@ -79,6 +99,7 @@ class CLIWorker:
                     errors="replace",
                     timeout=self.timeout,
                     cwd=workdir,
+                    env=self._env(),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise WorkerError(f"{self.name} が {self.timeout} 秒で終わりませんでした") from exc

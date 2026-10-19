@@ -16,7 +16,7 @@ import pandas as pd
 from keiba import db
 from keiba import features as F
 from keiba.betting import suggest_bets
-from keiba.model import ModelBundle, training_rows
+from keiba.model import ModelBundle, evaluate, training_rows
 
 
 @dataclass
@@ -165,6 +165,8 @@ def run_backtest(
         equity.append(bankroll)
 
     strategies = [s.summary() for s in (s_top, s_place, s_ev, s_kelly, s_fav)]
+    # 精度も、上の精算と同じレース (未確定の出馬表・払戻の無いレースを除いたもの) で測る
+    test_metrics = evaluate(bundle, rows[rows["race_id"].isin(pred["race_id"].unique())])
     return {
         "start": str(start_ts.date()),
         "end": str(end_ts.date()),
@@ -177,4 +179,5 @@ def run_backtest(
         "equity": [round(x) for x in equity],
         "final_bankroll": bankroll,
         "start_bankroll": float(betting.get("bankroll", 100_000)),
+        "test_metrics": test_metrics,
     }

@@ -71,9 +71,9 @@ class ModelBundle:
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         """特徴量付きの出走表 → 勝率など. df は build_features の出力.
 
-        一部の馬だけオッズが無いレース (当日の取消が出馬表に反映されていないときなど) は、
-        オッズの無い馬にモデルの勝率を残し、残りの確率をオッズのある馬どうしのブレンドで配分する。
-        partial_market 列でそのレースを示す。オッズが1頭も無いレースはモデルの勝率だけを使う。
+        一部の馬だけオッズが無いレースでは、オッズの無い馬は取消 (出馬表に未反映) とみなして
+        勝率を0にし、オッズのある馬どうしで確率を配分する。partial_market 列でそのレースを示す
+        (p_model 列にはモデル単独の勝率が残る)。オッズが1頭も無いレースはモデルの勝率だけを使う。
         """
         out = df[["race_id", "horse_id", "horse_name", "number", "win_odds", "p_market"]].copy()
         race_ids = df["race_id"].to_numpy()
@@ -85,15 +85,16 @@ class ModelBundle:
         n_has = has.groupby(race).transform("sum")
         any_mkt = (n_has > 0).to_numpy()
         out["partial_market"] = any_mkt & (n_has < race.groupby(race).transform("size")).to_numpy()
+        log_model = np.log(out["p_model"].clip(1e-9))
         if self.blend is not None:
             a, b = self.blend
-            logit = a * np.log(out["p_model"].clip(1e-9)) + b * np.log(out["p_market"].clip(1e-9).fillna(1.0))
-            # オッズの無い馬はブレンドから外す (オッズが1頭も無いレースは下で使わないので 0 のまま)
-            logit = np.where(has, logit, np.where(any_mkt, -np.inf, 0.0))
-            blended = race_softmax(logit, race_ids)
-            missing = out["p_model"].where(~has, 0.0).groupby(race).transform("sum").to_numpy()
-            mixed = np.where(has, blended * (1.0 - missing), out["p_model"])
-            out["p_win"] = np.where(any_mkt, mixed, out["p_model"])
+            logit = a * log_model + b * np.log(out["p_market"].clip(1e-9).fillna(1.0))
+        else:
+            logit = log_model
+        # オッズの無い馬 (取消とみなす) を除いて配分する。オッズが1頭も無いレースは下で使わないので 0 のまま
+        logit = np.where(has, logit, np.where(any_mkt, -np.inf, 0.0))
+        priced = race_softmax(np.asarray(logit, dtype=float), race_ids)
+        out["p_win"] = np.where(any_mkt, np.where(has, priced, 0.0), out["p_model"])
         out["p_top2"] = np.nan
         out["p_top3"] = np.nan
         out["p_place"] = np.nan

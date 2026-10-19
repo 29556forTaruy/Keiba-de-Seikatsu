@@ -244,3 +244,17 @@ def test_card_does_not_overwrite_finished_race(fetcher, tmp_path):
         assert after[col] == before[col], col
     assert after["going"] == "稍重"
     assert after["course_detail"] == "外"  # 結果ページで空だった列だけ出馬表で埋める
+
+
+def test_odds_missing_horse_is_marked_scratched(fetcher, tmp_path):
+    """発売中に単勝オッズの無い馬は、出馬表に未反映でも取消として扱う."""
+    conn = db.connect(tmp_path / "k.sqlite")
+    race_id = "202608040711"
+    fetcher.pages[urls.shutuba(race_id)] = fix("shutuba.html")
+    collect.collect_card(conn, fetcher, race_id)
+    fetcher.pages[urls.odds_api(race_id)] = fix("odds.json").replace('"04":["12.8","","3"]', '"04":["0.0","","0"]')
+    parsed = collect.collect_odds(conn, fetcher, race_id)
+    assert parsed["scratched"] == [4]
+    scratched = {n for (n,) in conn.execute(
+        "SELECT number FROM entries WHERE race_id = ? AND scratched = 1", (race_id,)).fetchall()}
+    assert scratched == {3, 4}

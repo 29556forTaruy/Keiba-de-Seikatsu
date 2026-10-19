@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from typing import Any
 
 from keiba.constants import BET_TYPES, MARKS, UNORDERED_BETS
@@ -116,6 +117,7 @@ def race_brief(ctx: dict[str, Any]) -> dict[str, Any]:
             "馬体重": h.get("horse_weight"), "増減": h.get("weight_diff"),
             "父": h.get("sire"), "母父": h.get("damsire"),
             "単勝オッズ": h.get("win_odds"), "人気": h.get("popularity"),
+            "取消の可能性": bool(ctx.get("has_odds") and not h.get("win_odds")),
             "予想勝率": _r(h.get("p_win")), "複勝圏確率": _r(h.get("p_place")),
             "市場勝率": _r(h.get("p_market")), "期待値": _r(h.get("ev"), 2),
             "脚質": h.get("style"), "間隔(日)": h.get("days_since"),
@@ -181,8 +183,11 @@ def predict(worker: Worker, ctx: dict[str, Any], *, budget: int, news: str | Non
     result = worker.run(prompt, system=PREDICT_SYSTEM, schema=PREDICT_SCHEMA)
     if not isinstance(result.data, dict):
         raise WorkerError("予想のJSONが得られませんでした")
+    # オッズのあるレースでオッズの無い馬は取消とみなし、買い目の対象から外す
+    runners = [h for h in ctx["horses"] if h.get("number") is not None and (h.get("win_odds") or not ctx.get("has_odds"))]
+    frames = Counter(h["frame"] for h in runners if h.get("frame"))
     try:
-        result.data = validate_prediction(result.data, {h["number"] for h in ctx["horses"]}, budget)
+        result.data = validate_prediction(result.data, {h["number"] for h in runners}, budget, frames)
     except (TypeError, ValueError, AttributeError) as exc:  # 想定外の形でも、このレースだけの失敗にする
         raise WorkerError(f"予想のJSONの形式が正しくありません: {exc}") from exc
     return result
@@ -212,6 +217,15 @@ def _amount(v: Any) -> int | None:
         return None
 
 
+def _valid_frame_pair(nums: list[int], frames: Counter | None) -> bool:
+    """枠連の組番が買えるものか (JRAは8頭以下のレースで枠連を発売しない)."""
+    if frames is None:  # 枠の情報が無いときは範囲だけ確かめる
+        return all(1 <= n <= 8 for n in nums) and len(set(nums)) == len(nums)
+    if sum(frames.values()) <= 8 or not all(frames.get(n, 0) > 0 for n in nums):
+        return False
+    return nums[0] != nums[1] or frames[nums[0]] >= 2
+
+
 def _fit_units(units: list[int], cap: int) -> list[int]:
     """各買い目の口数 (100円単位) を合計 cap 口以内に縮める.
 
@@ -231,10 +245,12 @@ def _fit_units(units: list[int], cap: int) -> list[int]:
     for i in keep:
         out[i] = max(1, int(exact[i]))
     left = cap - sum(out)
-    for i in sorted(keep, key=lambda i: (-(exact[i] - int(exact[i])), i)):
+    # 端数は「配った口数が本来の取り分に届いていない」買い目にだけ足す
+    # (最低1口に切り上げた買い目に足すと、小さい買い目が大きい買い目を追い越す)
+    for i in sorted(keep, key=lambda i: (-(exact[i] - out[i]), i)):
         if left <= 0:
             break
-        if out[i] < units[i]:
+        if out[i] < exact[i]:
             out[i] += 1
             left -= 1
     while left < 0:  # 最低1口にした分で超えたら、口数の多い買い目から戻す
@@ -244,9 +260,12 @@ def _fit_units(units: list[int], cap: int) -> list[int]:
     return out
 
 
-def validate_prediction(data: dict[str, Any], numbers: set[int], budget: int) -> dict[str, Any]:
+def validate_prediction(
+    data: dict[str, Any], numbers: set[int], budget: int, frames: Counter | None = None
+) -> dict[str, Any]:
     """LLMの予想を検査・補正する: 存在しない馬番・不正な組番を除き、予算に収める.
 
+    frames は枠番 → その枠の頭数。枠連の検査に使う (同じ枠の組は2頭以上いる枠だけ、8頭以下のレースは枠連なし)。
     CLI作業者の出力はスキーマで強制されないので、型が違う値 (文字列の金額・リストでない項目など) も受け付ける。
     """
     out = {k: data.get(k) for k in PREDICT_SCHEMA["required"]}
@@ -282,9 +301,12 @@ def validate_prediction(data: dict[str, Any], numbers: set[int], budget: int) ->
         if not isinstance(bet_type, str) or bet_type not in need:
             continue
         nums = [int(x) for x in re.findall(r"\d+", str(b.get("combination", "")))]
-        if len(nums) != need[bet_type] or len(set(nums)) != len(nums):
+        if len(nums) != need[bet_type]:
             continue
-        if bet_type != "枠連" and not all(n in numbers for n in nums):
+        if bet_type == "枠連":
+            if not _valid_frame_pair(nums, frames):
+                continue
+        elif len(set(nums)) != len(nums) or not all(n in numbers for n in nums):
             continue
         amount = _amount(b.get("amount"))
         if amount is None or amount <= 0:

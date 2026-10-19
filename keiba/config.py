@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,14 +69,39 @@ DEFAULTS: dict[str, Any] = {
     },
     # サブスク契約のCLIを作業者として使う場合のコマンド。プロンプトは標準入力で渡す。
     # ({prompt} を書くと引数で渡すが、Windows ではコマンドラインの長さ制限を超えやすいので使わない)
-    # Claude Code は使えるツールを Web 検索だけに絞る (手元のファイルを読ませない)。
+    # Claude Code は組み込みツールを Web 検索だけに絞り、ユーザー設定の MCP サーバーも読み込まない
+    # (手元のファイルを読ませない)。claude_keep_api_key が false なら ANTHROPIC_API_KEY を渡さず、
+    # サブスクのログインで動かす (渡すとAPIの従量課金になる)。
     "cli": {
         "timeout": 600,
-        "claude_cli": ["claude", "-p", "--tools", "WebSearch", "--allowedTools", "WebSearch"],
+        "claude_keep_api_key": False,
+        "claude_cli": ["claude", "-p", "--strict-mcp-config", "--tools", "WebSearch", "--allowedTools", "WebSearch"],
         "gemini_cli": ["gemini"],
         "codex_cli": ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-"],
     },
 }
+
+
+# 以前の版の既定コマンド。config.toml にそのまま残っていたら新しい既定値に置き換える
+# (プロンプトを引数で渡し、ツールも制限していなかったため)
+LEGACY_CLI_DEFAULTS = {
+    "claude_cli": [["claude", "-p", "{prompt}"],
+                   ["claude", "-p", "--tools", "WebSearch", "--allowedTools", "WebSearch"]],
+    "gemini_cli": [["gemini", "-p", "{prompt}"]],
+    "codex_cli": [["codex", "exec", "--skip-git-repo-check", "{prompt}"],
+                  ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"]],
+}
+
+
+def _migrate_cli(raw: dict[str, Any]) -> list[str]:
+    """古い既定のCLIコマンドを新しい既定値にする. 置き換えた作業者名を返す."""
+    cli = raw.get("cli", {})
+    changed = []
+    for name, olds in LEGACY_CLI_DEFAULTS.items():
+        if cli.get(name) in olds:
+            cli[name] = list(DEFAULTS["cli"][name])
+            changed.append(name)
+    return changed
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -126,6 +152,11 @@ def load_settings(config_path: str | Path | None = None, db: str | None = None) 
         with path.open("rb") as f:
             raw = _deep_merge(raw, tomllib.load(f))
         base_dir = path.resolve().parent
+        changed = _migrate_cli(raw)
+        if changed:
+            print(f"注意: {path} の [cli] {', '.join(changed)} は以前の既定値だったので、新しい既定値"
+                  "（標準入力で渡し、ツールを制限する）を使います。config.example.toml を見て書き直してください",
+                  file=sys.stderr)
     elif config_path:
         raise FileNotFoundError(f"設定ファイルが見つかりません: {path}")
 

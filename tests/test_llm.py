@@ -153,6 +153,7 @@ def test_cli_defaults_pass_prompt_on_stdin_and_limit_tools():
         assert not any("{prompt}" in part for part in cli[name]), name
     claude = cli["claude_cli"]
     assert claude[claude.index("--tools") + 1] == "WebSearch"
+    assert "--strict-mcp-config" in claude  # ユーザー設定の MCP ツールも読み込ませない
     assert cli["codex_cli"][-1] == "-" and "read-only" in cli["codex_cli"]
     for parts in cli.values():
         if isinstance(parts, list):
@@ -195,6 +196,10 @@ def test_cli_worker_refuses_prompt_argument_for_cmd_shims(tmp_path):
     ("[出典](https://example.com/a) と See https://example.com/b. と **https://example.com/c**",
      ["https://example.com/a", "https://example.com/b", "https://example.com/c"]),
     ("https://ja.wikipedia.org/wiki/イクイノックス 参照", ["https://ja.wikipedia.org/wiki/イクイノックス"]),
+    ("https://ja.wikipedia.org/wiki/ドウデュース_(競走馬) より", ["https://ja.wikipedia.org/wiki/ドウデュース_(競走馬)"]),
+    ("(see https://en.wikipedia.org/wiki/Equinox_(horse))", ["https://en.wikipedia.org/wiki/Equinox_(horse)"]),
+    ("`https://example.com/code`", ["https://example.com/code"]),
+    ("https://news.example.com/?no=1によると好調", ["https://news.example.com/?no=1"]),
 ])
 def test_find_urls_stops_at_japanese_punctuation(text, urls):
     assert find_urls(text) == urls
@@ -272,3 +277,60 @@ def test_make_worker_wraps_unexpected_errors(monkeypatch):
     monkeypatch.setattr(claude, "ClaudeWorker", boom)
     with pytest.raises(WorkerError, match="初期化できません"):
         make_worker("claude_api", SimpleNamespace(section=lambda name: {}))
+
+
+def test_remainder_units_do_not_reverse_bet_order():
+    """最低1口に切り上げた小さい買い目が、大きい買い目を追い越さない."""
+    from itertools import product
+
+    from keiba.llm.tasks import _fit_units
+
+    assert _fit_units([2, 3, 4], 4) == [1, 1, 2]
+    assert _fit_units([2, 3, 5, 20], 10) == [1, 1, 2, 6]
+    for units in product(range(1, 9), repeat=3):
+        for cap in range(3, sum(units)):
+            out = _fit_units(list(units), cap)
+            assert sum(out) == cap
+            for i in range(3):
+                for j in range(3):
+                    if units[i] < units[j]:
+                        assert out[i] <= out[j], (units, cap, out)
+
+
+def test_frame_quinella_validation():
+    from collections import Counter
+
+    bet = lambda combo: {"summary": "", "marks": [], "risks": [], "skip_reason": "",  # noqa: E731
+                         "bets": [{"type": "枠連", "combination": combo, "amount": 100, "reason": ""}]}
+    frames = Counter({1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 6: 2, 7: 2, 8: 2})  # 12頭
+    nums = set(range(1, 13))
+    validate_prediction = llm_tasks.validate_prediction
+    assert validate_prediction(bet("5-5"), nums, 1000, frames)["bets"]  # 2頭いる枠のゾロ目は買える
+    assert not validate_prediction(bet("1-1"), nums, 1000, frames)["bets"]  # 1頭の枠のゾロ目は無い
+    assert not validate_prediction(bet("1-9"), nums, 1000, frames)["bets"]  # 9枠は無い
+    small = Counter({i: 1 for i in range(1, 9)})  # 8頭立ては枠連を発売しない
+    assert not validate_prediction(bet("1-2"), set(range(1, 9)), 1000, small)["bets"]
+
+
+def test_claude_cli_does_not_inherit_api_key(tmp_path, monkeypatch):
+    """claude_cli はサブスクのログインで動かす (APIキーを渡すと従量課金になる)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    body = "import os, sys; sys.stdin.read(); print(os.environ.get('ANTHROPIC_API_KEY', 'NONE'))"
+    exe = _script(tmp_path, "claude", body)
+    assert CLIWorker("claude_cli", [exe, "-p", "--tools", "WebSearch"]).run("x").text == "NONE"
+    keep = CLIWorker("claude_cli", [exe, "-p", "--tools", "WebSearch"], keep_api_key=True)
+    assert keep.run("x").text == "sk-test"
+    # ほかのCLIの環境変数はそのまま
+    assert CLIWorker("gemini_cli", [_script(tmp_path, "gemini", body)]).run("x").text == "sk-test"
+
+
+def test_legacy_cli_defaults_are_migrated(tmp_path, capsys):
+    from keiba.config import load_settings
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[cli]\nclaude_cli = ["claude", "-p", "{prompt}"]\ncodex_cli = ["my-codex", "{prompt}"]\n',
+                   encoding="utf-8")
+    settings = load_settings(cfg)
+    assert settings.section("cli")["claude_cli"] == DEFAULTS["cli"]["claude_cli"]
+    assert settings.section("cli")["codex_cli"] == ["my-codex", "{prompt}"]  # 自分で書いたものは残す
+    assert "claude_cli" in capsys.readouterr().err

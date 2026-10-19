@@ -29,7 +29,7 @@ def _predict_future(bundle, runs):
 
 
 def test_predict_blends_when_some_odds_missing(trained):
-    """1頭だけオッズが無くても (当日取消が出馬表に未反映など)、ほかの馬はオッズとのブレンドを使う."""
+    """1頭だけオッズが無いとき (当日取消が出馬表に未反映など)、その馬は勝率0、ほかの馬はオッズとのブレンドを使う."""
     runs, bundle = trained
     bundle = dataclasses.replace(bundle, blend=(0.6, 0.8))
     full = _predict_future(bundle, runs)
@@ -46,10 +46,11 @@ def test_predict_blends_when_some_odds_missing(trained):
     assert np.allclose(part.groupby("race_id")["p_win"].sum(), 1.0)
     assert part.loc[part["race_id"] == partial_race, "partial_market"].all()
     assert not part.loc[part["race_id"] != partial_race, "partial_market"].any()
-    # オッズの無い馬はモデルの勝率のまま、残りはオッズのある馬どうしのブレンドで配分する
-    assert part.loc[gone, "p_win"] == pytest.approx(part.loc[gone, "p_model"])
+    # オッズの無い馬は取消とみなして0、残りはオッズのある馬どうしのブレンドで配分する
+    assert part.loc[gone, "p_win"] == 0.0
+    assert part.loc[gone, "p_place"] < 1e-6
     others = in_race.drop(gone)
-    assert part.loc[others, "p_win"].sum() == pytest.approx(1 - part.loc[gone, "p_model"])
+    assert part.loc[others, "p_win"].sum() == pytest.approx(1.0)
     rel_part = part.loc[others, "p_win"] / part.loc[others, "p_win"].sum()
     rel_full = full.loc[others, "p_win"] / full.loc[others, "p_win"].sum()
     assert np.allclose(rel_part, rel_full)

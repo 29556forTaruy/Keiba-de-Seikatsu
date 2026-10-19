@@ -62,3 +62,4 @@ def test_races_without_win_payout_are_skipped(copied):
     conn.commit()
     with pytest.raises(ValueError, match="払戻"):
         backtest.run_backtest(conn, bundle, str(start), str(end), {"bankroll": 100_000}, runs=runs)
+

@@ -178,8 +178,18 @@ def collect_odds(conn: sqlite3.Connection, fetcher: Fetcher, race_id: str) -> di
         conn.commit()
         return parsed
     rows = [r for r in parsed["odds"] if r["win_odds"] is not None]
+    parsed["scratched"] = []
     if rows:
         db.save_odds(conn, race_id, rows)
+        # 発売中に単勝オッズの無い馬は取消・除外。出馬表 (キャッシュ) に未反映でも取消扱いにする
+        priced = {r["number"] for r in rows}
+        gone = [n for (n,) in conn.execute(
+            "SELECT number FROM entries WHERE race_id = ? AND scratched = 0 AND number IS NOT NULL", (race_id,)
+        ).fetchall() if n not in priced]
+        if gone:
+            conn.executemany("UPDATE entries SET scratched = 1 WHERE race_id = ? AND number = ?",
+                             [(race_id, n) for n in gone])
+            parsed["scratched"] = gone
         conn.commit()
     return parsed
 

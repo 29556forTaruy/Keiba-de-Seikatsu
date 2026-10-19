@@ -89,5 +89,6 @@ def _make_worker(name: str, settings) -> Worker:
         from keiba.llm.cli_worker import CLIWorker
 
         cli = settings.section("cli")
-        return CLIWorker(name, cli[name], timeout=cli.get("timeout", 600))
+        return CLIWorker(name, cli[name], timeout=cli.get("timeout", 600),
+                         keep_api_key=bool(cli.get("claude_keep_api_key", False)))
     raise WorkerError(f"不明な作業者です: {name} (選べるもの: {', '.join(WORKER_NAMES)})")

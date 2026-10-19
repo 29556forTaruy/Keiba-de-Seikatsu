@@ -240,18 +240,24 @@ def test_run_day_collects_unsettled_results_and_falls_back_on_fetch_error(demo_d
     monkeypatch.setattr(http.Fetcher, "from_settings", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(collect, "collect_cards_for_date", lambda *a, **k: [])
     monkeypatch.setattr(collect, "collect_race", lambda conn, f, rid, **k: calls["race"].append(rid))
+    monkeypatch.setattr(collect, "collect_pedigrees", lambda *a, **k: calls.__setitem__("pedigree", 1))
+
+    # オッズが取れれば、そのあと前の開催日の成績を取り込んでから予想する
+    monkeypatch.setattr(collect, "collect_odds", lambda conn, f, rid: {"market": True, "scratched": []})
+    pipeline.run_day(conn, _settings(tmp_path), upcoming, progress=lambda *_: None)
+    assert calls["race"] == stale, "前の開催日の成績を取り込む"
 
     def blocked(conn, f, rid):
         calls["odds"].append(rid)
         raise http.FetchError("HTTP 403: アクセスが拒否されました")
 
+    calls["race"].clear()
+    calls["pedigree"] = 0
     monkeypatch.setattr(collect, "collect_odds", blocked)
-    monkeypatch.setattr(collect, "collect_pedigrees", lambda *a, **k: calls.__setitem__("pedigree", 1))
     msgs = []
     pages = pipeline.run_day(conn, _settings(tmp_path), upcoming, progress=msgs.append)
-    assert calls["race"] == stale, "前の開催日の成績を先に取り込む"
     # 取得エラーが続いたら以降の通信はせず、DBにある分だけでレポートを作る
-    assert len(calls["odds"]) == pipeline.MAX_FETCH_FAILURES and calls["pedigree"] == 0
+    assert len(calls["odds"]) == pipeline.MAX_FETCH_FAILURES and calls["pedigree"] == 0 and not calls["race"]
     assert any("DBにあるデータだけ" in m for m in msgs)
     assert any(p.name == "index.html" for p in pages)
 
@@ -441,3 +447,62 @@ def test_single_race_run_keeps_the_day_index(trained, demo_db, tmp_path):
     html = pipeline.build_reports(conn, settings, ids[:1], bundle=bundle, progress=lambda *_: None)[-1].read_text(
         encoding="utf-8")
     assert f'href="{ids[1]}.html"' not in html and f"{len(ids) - 1}レース" in html
+
+
+def test_market_only_predict_zeroes_horses_without_odds():
+    """モデル未学習でも、オッズのあるレースでオッズの無い馬は取消扱い (勝率0)."""
+    import pandas as pd
+
+    rows = pd.DataFrame({
+        "race_id": ["R1"] * 4 + ["R2"] * 3, "horse_id": list("abcdefg"), "horse_name": list("abcdefg"),
+        "number": [1, 2, 3, 4, 1, 2, 3], "win_odds": [2.0, 4.0, None, 8.0, None, None, None],
+        "p_market": [0.57, 0.29, None, 0.14, None, None, None],
+    })
+    out = pipeline.market_only_predict(rows).set_index("horse_id")
+    assert out.loc["c", "p_win"] == 0.0
+    assert out.loc[list("abd"), "p_win"].sum() == pytest.approx(1.0)
+    assert out.loc[list("efg"), "p_win"].tolist() == pytest.approx([1 / 3] * 3)  # オッズが無いレースは均等
+
+
+def test_day_index_ignores_pages_from_another_db(trained, demo_db, tmp_path):
+    """reports/ を共有していても、別のDBで作ったページは一覧に混ぜない."""
+    import shutil
+
+    _, _, bundle, _, _ = trained
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    ids = pipeline.upcoming_race_ids(conn, upcoming.isoformat())
+    pipeline.build_reports(conn, _settings(tmp_path, "copy.sqlite"), ids, bundle=bundle, progress=lambda *_: None)
+    other = tmp_path / "other.sqlite"
+    shutil.copy(tmp_path / "copy.sqlite", other)
+    conn2 = db.connect(other)
+    index = pipeline.build_reports(conn2, _settings(tmp_path, "other.sqlite"), ids[:1], bundle=bundle,
+                                   progress=lambda *_: None)[-1]
+    html = index.read_text(encoding="utf-8")
+    assert f'href="{ids[0]}.html"' in html
+    assert f'href="{ids[1]}.html"' not in html and "1レース" in html
+
+
+def test_backtest_metrics_use_the_same_races_as_the_simulation(trained):
+    conn, runs, bundle, valid_end, upcoming = trained
+    start = (valid_end + timedelta(days=1)).date()
+    res = backtest.run_backtest(conn, bundle, str(start), str(upcoming), {"bankroll": 100_000}, runs=runs)
+    assert res["test_metrics"]["races"] == res["races"]
+    assert {"nll_model", "nll_market", "nll_blend"} <= set(res["test_metrics"])
+
+
+def test_catch_up_only_fetches_recent_unsettled_races(demo_db, tmp_path, monkeypatch):
+    """day のついでに取り込むのは直近の未取得レースだけ。古いものは collect results を案内する."""
+    from keiba.scraper import collect
+
+    conn, upcoming = _copy_db(demo_db, tmp_path)
+    stale = _unsettle(conn, upcoming, 8)
+    conn.execute(f"UPDATE races SET source = 'netkeiba' WHERE race_id IN ({','.join('?' * len(stale))})", stale)
+    conn.commit()
+    fetched, msgs = [], []
+    monkeypatch.setattr(collect, "collect_race", lambda conn, f, rid, **k: fetched.append(rid))
+    pipeline._catch_up_results(conn, None, upcoming, msgs.append)
+    since = (upcoming - timedelta(days=pipeline.CATCH_UP_DAYS)).isoformat()
+    assert fetched and len(fetched) < len(stale)
+    assert all(db.get_race(conn, rid)["date"] >= since for rid in fetched)
+    assert len(fetched) <= pipeline.CATCH_UP_MAX_RACES
+    assert any("keiba collect results" in m for m in msgs)

@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Callable, Iterable
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -83,11 +83,15 @@ def load_model(
 # ---------------------------------------------------------------- 予想
 
 def market_only_predict(rows: pd.DataFrame) -> pd.DataFrame:
-    """モデル未学習のとき: オッズがあれば市場の勝率、なければ均等."""
+    """モデル未学習のとき: オッズがあれば市場の勝率、なければ均等.
+
+    オッズのあるレースでオッズの無い馬は取消とみなして 0 にする。
+    """
     out = rows[["race_id", "horse_id", "horse_name", "number", "win_odds", "p_market"]].copy()
     n = out.groupby("race_id")["horse_id"].transform("size")
+    any_mkt = out["p_market"].notna().groupby(out["race_id"]).transform("any")
     out["p_model"] = np.nan
-    out["p_win"] = out["p_market"].fillna(1.0 / n)
+    out["p_win"] = out["p_market"].fillna(0.0).where(any_mkt, 1.0 / n)
     out["p_win"] = out["p_win"] / out.groupby("race_id")["p_win"].transform("sum")
     for col in ("p_top2", "p_top3", "p_place"):
         out[col] = np.nan
@@ -135,7 +139,9 @@ def _drop_stale_cards(runs: pd.DataFrame, race_ids: list[str], progress: Progres
     targeted = runs["race_id"].isin(race_ids)
     keep = (runs["is_future"] == 0) | targeted
     if targeted.any():
-        stale = runs[~keep & (runs["date"] < runs.loc[targeted, "date"].min())]
+        # 警告は結果が出ているはずのレース (対象日・今日のどちらよりも前) だけ。先の日付の出馬表は黙って除く
+        cutoff = min(runs.loc[targeted, "date"].min(), pd.Timestamp(date.today()))
+        stale = runs[~keep & (runs["date"] < cutoff)]
         if not stale.empty:
             first, last = stale["date"].min().date(), stale["date"].max().date()
             progress(f"注意: 成績が未取得の過去レースが {stale['race_id'].nunique()}件あります ({first}〜{last})。"
@@ -154,16 +160,23 @@ def _save_summary(path: Path, item: dict[str, Any]) -> None:
     path.write_text(json.dumps(render.np_safe(item), ensure_ascii=False, default=str), encoding="utf-8")
 
 
-def _load_summaries(day_dir: Path) -> list[dict[str, Any]]:
-    """その日のレースページ (HTMLが残っているもの) の要約をすべて読む."""
+def _load_summaries(day_dir: Path, db_key: str, race_ids: set[str]) -> list[dict[str, Any]]:
+    """その日のレースページ (HTMLが残っているもの) の要約を読む.
+
+    reports/ は DB をまたいで共有されるので、今の DB で作ったページで、今の DB にあるレースだけを使う。
+    """
     items = []
     for p in sorted(day_dir.glob("*.summary.json")):
-        if not p.with_name(p.name.removesuffix(".summary.json") + ".html").exists():
+        race_id = p.name.removesuffix(".summary.json")
+        if race_id not in race_ids or not p.with_name(race_id + ".html").exists():
             continue
         try:
-            items.append(json.loads(p.read_text(encoding="utf-8")))
+            item = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             log.warning("一覧用の要約を読めません: %s", p)
+            continue
+        if item.get("db") == db_key:
+            items.append(item)
     return items
 
 
@@ -179,6 +192,7 @@ def build_reports(
     progress: Progress = print,
 ) -> list[Path]:
     """指定レースの予想HTMLと、日付ごとの一覧HTMLを作る."""
+    db_key = str(Path(settings.db_path).resolve())
     race_ids = list(dict.fromkeys(race_ids))
     if not race_ids:
         return []
@@ -287,12 +301,13 @@ def build_reports(
         pages.append(path)
         item = render.summarize_for_index(ctx, f"{race_id}.html")
         item["is_demo"] = race.get("source") == "demo"
+        item["db"] = db_key
         _save_summary(day_dir / f"{race_id}.summary.json", item)
         day_dirs[race["date"]] = day_dir
 
     # 一覧は今回作ったレースだけでなく、その日のレースページすべてから作り直す (1レースだけ更新しても減らない)
     for day, day_dir in day_dirs.items():
-        items = _load_summaries(day_dir)
+        items = _load_summaries(day_dir, db_key, set(db.race_ids_on(conn, day)))
         pages.append(render.render_index(day, items, day_dir / "index.html",
                                          is_demo=any(it.get("is_demo") for it in items)))
     return pages
@@ -340,6 +355,42 @@ def _fetch_each(race_ids: list[str], fetch: Callable[[str], Any], what: str, pro
             progress(f"  {race_id}: {what}スキップ ({exc})")
 
 
+# day のついでに成績を取り込む過去レースの範囲 (それより古いものは collect results を案内する)
+CATCH_UP_DAYS = 14
+CATCH_UP_MAX_RACES = 48
+
+
+def _catch_up_results(conn: sqlite3.Connection, fetcher, day: date, progress: Progress) -> None:
+    """前の開催日の出馬表だけ残っているレースの成績を取り込む (前走の情報が欠けないように).
+
+    時間のかかるものは後回しにするため、出馬表とオッズの取得のあとに呼ぶ。直近の分だけ取り、
+    通信エラーが続いても (アクセス拒否以外は) ここで止めて当日の予想に進む。
+    """
+    from keiba.scraper import collect
+    from keiba.scraper.http import AccessDenied, FetchError
+
+    cutoff = min(day, date.today())
+    unsettled = unsettled_race_ids(conn, cutoff.isoformat())
+    if not unsettled:
+        return
+    since = (cutoff - timedelta(days=CATCH_UP_DAYS)).isoformat()
+    recent = [rid for rid in unsettled if (db.get_race(conn, rid) or {}).get("date", "") >= since]
+    older = len(unsettled) - len(recent)
+    if older:
+        progress(f"注意: {since} より前に成績が未取得のレースが {older}件あります。"
+                 "keiba collect results --start … --end … で取り込んでください")
+    recent = recent[-CATCH_UP_MAX_RACES:]
+    if not recent:
+        return
+    progress(f"成績が未取得の過去レース {len(recent)}件の成績を取得します")
+    try:
+        _fetch_each(recent, lambda rid: collect.collect_race(conn, fetcher, rid), "成績取得", progress)
+    except AccessDenied:
+        raise
+    except FetchError as exc:
+        progress(f"過去レースの成績取得を中断しました ({exc})")
+
+
 def _collect_day(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -355,18 +406,17 @@ def _collect_day(
 
     fetcher = Fetcher.from_settings(settings)
     collect.collect_cards_for_date(conn, fetcher, day, progress=progress)
-    # 前の開催日の出馬表だけ残っているレースは、成績を取り込んでから予想する (前走の情報が欠けないように)
-    unsettled = unsettled_race_ids(conn, min(day, date.today()).isoformat())
-    if unsettled:
-        progress(f"成績が未取得の過去レース {len(unsettled)}件の成績を取得します")
-        _fetch_each(unsettled, lambda rid: collect.collect_race(conn, fetcher, rid), "成績取得", progress)
     ids = db.race_ids_on(conn, day.isoformat())
     if odds:
         def fetch_odds(rid: str) -> None:
-            if not collect.collect_odds(conn, fetcher, rid).get("market", True):
+            parsed = collect.collect_odds(conn, fetcher, rid)
+            if not parsed.get("market", True):
                 progress(f"  {rid}: オッズ未発売 (予想オッズは使いません)")
+            elif parsed.get("scratched"):
+                progress(f"  {rid}: オッズの無い馬番 {parsed['scratched']} を取消として扱います")
 
         _fetch_each(ids, fetch_odds, "オッズ取得", progress)
+    _catch_up_results(conn, fetcher, day, progress)
     horse_ids = [r[0] for r in conn.execute(
         f"SELECT DISTINCT horse_id FROM entries WHERE race_id IN ({','.join('?' * len(ids))})", ids
     ).fetchall()] if ids else []

@@ -77,7 +77,7 @@
   {% if not informative %}<p class="note">学習済みモデルもオッズもないため、全馬同じ勝率（1/頭数）です。勝率による印・本命・組み合わせは表示しません（<code>keiba train</code> で学習できます）。</p>{% endif %}
   {% if not numbered %}<p class="note">枠順(馬番)が未確定のため、推奨馬券と組み合わせは表示しません。</p>{% endif %}
   {% if not has_odds %}<p class="note">オッズ未取得のため、市場勝率・期待値は空欄です（<code>keiba collect odds {{ race.race_id }}</code>）。</p>{% endif %}
-  {% if no_odds %}<p class="note">{% if numbered %}馬番 {% endif %}{{ no_odds | join("・") }} のオッズがありません（出走取消の可能性があります）。この馬は推奨馬券の対象外で、勝率に市場の評価が入っていません。出馬表を取り直すと取消が反映されます（<code>keiba collect card {{ race.race_id }}</code>）。</p>{% endif %}
+  {% if no_odds %}<p class="note">{% if numbered %}馬番 {% endif %}{{ no_odds | join("・") }} のオッズがありません。出走取消とみなして勝率0とし、推奨馬券と組み合わせの対象から外しています。出馬表を取り直すと取消が反映されます（<code>keiba collect card {{ race.race_id }}</code>）。</p>{% endif %}
 </section>
 
 <section class="card">

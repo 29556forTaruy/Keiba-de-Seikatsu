@@ -142,6 +142,8 @@ def cmd_collect(settings: Settings, args: argparse.Namespace) -> None:
                 print(f"{race_id}: 未発売 (予想オッズのため保存しません)")
             else:
                 print(f"{race_id}: {len(parsed['odds'])}頭 (状態 {parsed['status']}, {parsed['official_datetime']})")
+                if parsed.get("scratched"):
+                    print(f"  オッズの無い馬番 {parsed['scratched']} を取消として扱います")
     elif args.what == "pedigree":
         n = collect.collect_pedigrees(conn, fetcher, limit=args.limit)
         print(f"血統 {n}頭を保存しました")
@@ -174,7 +176,7 @@ def cmd_train(settings: Settings, args: argparse.Namespace) -> None:
 
 
 def cmd_backtest(settings: Settings, args: argparse.Namespace) -> None:
-    from keiba import backtest, features, model
+    from keiba import backtest, features
     from keiba.pipeline import load_model
     from keiba.report import render
 
@@ -191,12 +193,9 @@ def cmd_backtest(settings: Settings, args: argparse.Namespace) -> None:
     for s in res["strategies"]:
         print(f"{s['name']:<14}{s['bets']:>6}{s['hit_rate']:>8.1%}{s['roi']:>8.1%}{s['profit']:>+14,.0f}")
     print(f"ケリー資金管理: {res['start_bankroll']:,.0f}円 → {res['final_bankroll']:,.0f}円")
-    feat = features.build_features(runs, bundle.baseline)
-    period = feat[(feat["date"] >= str(args.start)) & (feat["date"] <= str(args.end))]
-    test_metrics = model.evaluate(bundle, period)
     is_demo = conn.execute("SELECT 1 FROM races WHERE source = 'demo' LIMIT 1").fetchone() is not None
     out = settings.path("reports") / f"backtest_{args.start:%Y%m%d}_{args.end:%Y%m%d}.html"
-    render.render_backtest(res, out, test_metrics=test_metrics, is_demo=is_demo)
+    render.render_backtest(res, out, test_metrics=res["test_metrics"], is_demo=is_demo)
     print(f"レポート: {out}")
     if args.json:
         Path(args.json).write_text(json.dumps(res, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -210,17 +209,14 @@ def cmd_predict(settings: Settings, args: argparse.Namespace) -> None:
     if args.collect:
         from keiba.scraper import collect
 
+        from keiba.pipeline import _fetch_each
+
         fetcher = _fetcher(settings, args)
+        ids = [r for r in args.race_ids if not db.has_results(conn, r)]
         try:
-            for race_id in args.race_ids:
-                if not db.has_results(conn, race_id):
-                    collect.collect_card(conn, fetcher, race_id)
-                    try:
-                        collect.collect_odds(conn, fetcher, race_id)
-                    except FetchError:
-                        raise
-                    except Exception as exc:
-                        print(f"{race_id}: オッズ取得スキップ ({exc})")
+            # 1レースの失敗では止めず、アクセス拒否か連続失敗のときだけ打ち切る (day と同じ扱い)
+            _fetch_each(ids, lambda r: collect.collect_card(conn, fetcher, r), "出馬表取得", print)
+            _fetch_each(ids, lambda r: collect.collect_odds(conn, fetcher, r), "オッズ取得", print)
         except FetchError as exc:  # アクセス拒否・通信断. DBにある分だけで作る
             print(f"注意: 取得に失敗したので、DBにあるデータだけでレポートを作ります ({exc})")
     pages = build_reports(conn, settings, args.race_ids, bundle=bundle,

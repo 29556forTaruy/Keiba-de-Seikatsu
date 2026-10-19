@@ -114,7 +114,7 @@ def default_marks(pred: pd.DataFrame, min_ev: float) -> dict[int, str]:
     """予想勝率の順に ◎○▲△△、それ以外で期待値が高い馬に ☆ (馬番確定前・勝率が均等なときは印なし)."""
     if not informative(pred):
         return {}
-    pred = pred[pred["number"].notna()]
+    pred = pred[pred["number"].notna() & (pred["p_win"] > 0)]  # 勝率0 (取消扱い) の馬に印は付けない
     order = pred.sort_values("p_win", ascending=False)["number"].astype(int).tolist()
     marks = {}
     for i, num in enumerate(order[:5]):

@@ -21,7 +21,7 @@
 2. **netkeiba への負荷を増やさない。** `http.min_interval` の下限（1 秒）を下げない、並列取得しない、キャッシュを使う。
 3. **レポートで中国語フォントを使わない。** `font-family` は日本語フォント（Hiragino / Yu Gothic / Meiryo / Noto Sans JP / IPA）だけ。`<html lang="ja">` を必ず付ける。`tests/test_pipeline.py` が禁止フォント名を検査している。
 4. **AI の出力は検査してから使う。** 馬番・組番・金額は `llm/tasks.py::validate_prediction` を通す。Web 由来の URL は http(s) だけ許可する（`dedupe_sources` / `safe_url`）。
-5. **CLI 作業者に危険な権限を与えない。** プロンプトに Web 由来の文章が入るので、書き込みやコマンド実行を自動承認するフラグ（`--yolo`、`--dangerously-*`、`danger-full-access` など）を既定にしない。既定のコマンドではプロンプトを標準入力で渡し（`{prompt}` を引数にしない）、Claude Code のツールは Web 検索だけに絞る。Codex の `--sandbox read-only` はファイルの読み取りを止めないことを忘れない。Web 由来の文章はプロンプトに JSON の文字列として入れ、データとして扱うよう指示する。
+5. **CLI 作業者に危険な権限を与えない。** プロンプトに Web 由来の文章が入るので、書き込みやコマンド実行を自動承認するフラグ（`--yolo`、`--dangerously-*`、`danger-full-access` など）を既定にしない。既定のコマンドではプロンプトを標準入力で渡し（`{prompt}` を引数にしない）、Claude Code のツールは Web 検索だけに絞り、MCP サーバーも読み込ませない（`--strict-mcp-config`）。Codex の `--sandbox read-only` はファイルの読み取りを止めないことを忘れない。Web 由来の文章はプロンプトに JSON の文字列として入れ、データとして扱うよう指示する。
 6. **回収率を誇張しない。** バックテストは学習・検証期間より後で行い、確定オッズを使っている限界を明記する。デモデータの結果を実力として扱わない。
 7. 変更したら `pytest` を通す。パーサーを直すときは、実ページの HTML（`data/raw/` に gzip で保存されている）から必要部分を `tests/fixtures/` に入れてテストを足す。
 
