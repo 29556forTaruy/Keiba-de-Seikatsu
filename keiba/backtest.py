@@ -118,6 +118,18 @@ def run_backtest(
     pred["popularity"] = rows["popularity"].to_numpy()
     pred["won"] = rows["won"].to_numpy()
     pays = _payout_lookup(conn, sorted(pred["race_id"].unique()))
+    # 単勝の払戻が1件も無いレースは精算できない (払戻表の取得・解析漏れ)。外れ扱いにすると
+    # 1番人気を含む全戦略の回収率が下がるので、ケリーの資金推移も含めて全戦略から除く
+    paid = {race_id for race_id, bet_type, _ in pays if bet_type == "単勝"}
+    unpaid = int(pred.loc[~pred["race_id"].isin(paid), "race_id"].nunique())
+    if unpaid:
+        warnings.append(
+            f"単勝の払戻データが無い {unpaid} レースを集計から除きました。"
+            "払戻表の取得漏れの可能性があります (keiba collect results --refresh で取り直せます)。"
+        )
+        pred = pred[pred["race_id"].isin(paid)]
+        if pred.empty:
+            raise ValueError(f"指定期間の確定レース ({unpaid}レース) に単勝の払戻データがありません")
 
     min_ev = betting.get("min_ev", 1.15)
     min_prob = betting.get("min_prob", 0.02)

@@ -5,6 +5,8 @@
 3. オッズがあれば、モデル勝率と市場勝率を対数線形にブレンド (Benter 方式)
      p ∝ exp(a·log p_model + b·log p_market)
    市場はかなり賢いので、モデル単独より大抵よくなる。
+4. 検証期間の精度 (metrics["valid"]) は、τ とブレンド係数をレース単位の交差検証で
+   当て直して測る (同じ期間で当てはめて測ると、当てはめた分だけ良く見えるため)。
 """
 
 from __future__ import annotations
@@ -62,23 +64,36 @@ class ModelBundle:
 
     # ------------------------------------------------------------ 推論
     def score(self, df: pd.DataFrame) -> np.ndarray:
-        proba = self.clf.predict_proba(F.model_matrix(df))[:, 1]
+        proba = self.clf.predict_proba(F.model_matrix(df, self.features))[:, 1]
         proba = np.clip(proba, 1e-6, 1 - 1e-6)
         return np.log(proba / (1 - proba))
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        """特徴量付きの出走表 → 勝率など. df は build_features の出力."""
+        """特徴量付きの出走表 → 勝率など. df は build_features の出力.
+
+        一部の馬だけオッズが無いレース (当日の取消が出馬表に反映されていないときなど) は、
+        オッズの無い馬にモデルの勝率を残し、残りの確率をオッズのある馬どうしのブレンドで配分する。
+        partial_market 列でそのレースを示す。オッズが1頭も無いレースはモデルの勝率だけを使う。
+        """
         out = df[["race_id", "horse_id", "horse_name", "number", "win_odds", "p_market"]].copy()
         race_ids = df["race_id"].to_numpy()
+        race = out["race_id"]
         out["score"] = self.score(df)
         out["p_model"] = race_softmax(out["score"].to_numpy() / self.tau, race_ids)
         out["p_win"] = out["p_model"]
+        has = out["p_market"].notna()
+        n_has = has.groupby(race).transform("sum")
+        any_mkt = (n_has > 0).to_numpy()
+        out["partial_market"] = any_mkt & (n_has < race.groupby(race).transform("size")).to_numpy()
         if self.blend is not None:
             a, b = self.blend
-            has_mkt = out["p_market"].notna().groupby(out["race_id"]).transform("all").to_numpy()
-            logit = a * np.log(out["p_model"].clip(1e-9)) + b * np.log(out["p_market"].clip(1e-9).fillna(1e-9))
-            blended = race_softmax(logit.to_numpy(), race_ids)
-            out["p_win"] = np.where(has_mkt, blended, out["p_model"])
+            logit = a * np.log(out["p_model"].clip(1e-9)) + b * np.log(out["p_market"].clip(1e-9).fillna(1.0))
+            # オッズの無い馬はブレンドから外す (オッズが1頭も無いレースは下で使わないので 0 のまま)
+            logit = np.where(has, logit, np.where(any_mkt, -np.inf, 0.0))
+            blended = race_softmax(logit, race_ids)
+            missing = out["p_model"].where(~has, 0.0).groupby(race).transform("sum").to_numpy()
+            mixed = np.where(has, blended * (1.0 - missing), out["p_model"])
+            out["p_win"] = np.where(any_mkt, mixed, out["p_model"])
         out["p_top2"] = np.nan
         out["p_top3"] = np.nan
         out["p_place"] = np.nan
@@ -122,6 +137,15 @@ def fit_blend(p_model: np.ndarray, p_market: np.ndarray, won: np.ndarray, race_i
     return float(res.x[0]), float(res.x[1])
 
 
+def _metrics(p_model: np.ndarray, p_market: np.ndarray, p_blend: np.ndarray, won: np.ndarray,
+             race_ids: np.ndarray) -> dict[str, Any]:
+    m: dict[str, Any] = {"races": int(len(np.unique(race_ids)))}
+    for name, p in (("model", p_model), ("market", p_market), ("blend", p_blend)):
+        m[f"nll_{name}"] = round(winner_nll(p, won, race_ids), 4)
+        m[f"top1_{name}"] = round(_top1_hit(p, won, race_ids), 4)
+    return m
+
+
 def evaluate(bundle: ModelBundle, df: pd.DataFrame) -> dict[str, Any]:
     """確定レースでの精度. 市場(オッズ)単独との比較つき."""
     rows = training_rows(df)
@@ -129,14 +153,46 @@ def evaluate(bundle: ModelBundle, df: pd.DataFrame) -> dict[str, Any]:
     if rows.empty:
         return {}
     pred = bundle.predict(rows)
-    won = rows["won"].to_numpy()
-    race_ids = rows["race_id"].to_numpy()
-    m: dict[str, Any] = {"races": int(rows["race_id"].nunique())}
-    for name, p in (("model", pred["p_model"]), ("market", rows["p_market"]), ("blend", pred["p_win"])):
-        p = p.to_numpy()
-        m[f"nll_{name}"] = round(winner_nll(p, won, race_ids), 4)
-        m[f"top1_{name}"] = round(_top1_hit(p, won, race_ids), 4)
-    return m
+    return _metrics(pred["p_model"].to_numpy(), rows["p_market"].to_numpy(), pred["p_win"].to_numpy(),
+                    rows["won"].to_numpy(), rows["race_id"].to_numpy())
+
+
+CV_FOLDS = 5
+
+
+def cross_fit_metrics(score: np.ndarray, va: pd.DataFrame, *, blend: bool, folds: int = CV_FOLDS) -> dict[str, Any]:
+    """検証期間の精度を、τ とブレンド係数をレース単位の K 分割で当て直して測る.
+
+    τ・係数を検証期間全体で決めてから同じ期間で測ると、当てはめた分だけ良く見える
+    (ブレンドは市場単独を含むので、モデルに力が無くても市場より悪くならない)。
+    各分割を、ほかの分割で決めた τ・係数で予測して測る。キーは evaluate と同じ。
+    """
+    race_ids = va["race_id"].to_numpy()
+    won = va["won"].to_numpy()
+    p_market = va["p_market"].to_numpy()
+    mkt_ok = va["p_market"].notna().groupby(va["race_id"]).transform("all").to_numpy()
+    if not mkt_ok.any():
+        return {}
+    races = np.unique(race_ids)
+    fold = pd.Series(np.arange(len(races)) % folds, index=races).reindex(race_ids).to_numpy()
+    lk = np.log(np.clip(p_market, 1e-9, None))
+    p_model = np.full(len(va), np.nan)
+    p_blend = np.full(len(va), np.nan)
+    for k in range(folds):
+        te, tr = fold == k, fold != k
+        if not te.any() or not tr.any():
+            continue
+        tau = fit_tau(score[tr], won[tr], race_ids[tr])
+        p_model[te] = race_softmax(score[te] / tau, race_ids[te])
+        p_blend[te] = p_model[te]
+        fm, tm = tr & mkt_ok, te & mkt_ok
+        if blend and fm.any() and tm.any():
+            a, b = fit_blend(race_softmax(score[fm] / tau, race_ids[fm]), p_market[fm], won[fm], race_ids[fm])
+            p_blend[tm] = race_softmax(a * np.log(np.clip(p_model[tm], 1e-9, None)) + b * lk[tm], race_ids[tm])
+    ok = mkt_ok & ~np.isnan(p_model)
+    if not ok.any():
+        return {}
+    return _metrics(p_model[ok], p_market[ok], p_blend[ok], won[ok], race_ids[ok])
 
 
 def train(
@@ -199,6 +255,7 @@ def train(
         "iterations": int(clf.n_iter_),
         "tau": round(bundle.tau, 4),
         "blend": None if bundle.blend is None else [round(x, 4) for x in bundle.blend],
-        "valid": evaluate(bundle, va),
+        # τ・ブレンドは検証期間全体で決めるが、精度は交差検証で測る (同じデータで測ると甘く出る)
+        "valid": cross_fit_metrics(score, va, blend=bundle.blend is not None),
     }
     return bundle
