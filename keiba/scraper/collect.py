@@ -5,30 +5,16 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable, Iterable
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, timedelta
 
 from keiba import db
-from keiba.scraper import parsers, urls
+from keiba.scraper import jra, parsers, urls
 from keiba.scraper.http import AccessDenied, Fetcher, FetchError
+from keiba.scraper.pages import jst_midnight as _jst_midnight
+from keiba.scraper.pages import parse_page as _parse
 
 log = logging.getLogger(__name__)
 Progress = Callable[[str], None]
-JST = timezone(timedelta(hours=9))
-
-
-def _jst_midnight(day: date) -> float:
-    """その日の 0:00 (日本時間) の UNIX 時刻."""
-    return datetime.combine(day, time(0), tzinfo=JST).timestamp()
-
-
-def _parse(fetcher: Fetcher, url: str, parse, *args, live: bool = False, refresh: bool = False, **kwargs):
-    """取得してパース。パースに失敗したらキャッシュを捨てて、次回は取り直す."""
-    html = fetcher.get(url, live=live, refresh=refresh)
-    try:
-        return parse(html, *args, **kwargs)
-    except parsers.ParseError:
-        fetcher.invalidate(url)
-        raise
 
 
 def _months(start: date, end: date) -> Iterable[tuple[int, int]]:
@@ -38,21 +24,55 @@ def _months(start: date, end: date) -> Iterable[tuple[int, int]]:
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
 
 
+def _from_jra(fetcher: Fetcher, what: str, reason: Exception | str, fetch: Callable, *args, **kwargs):
+    """netkeiba で取れなかったもの (理由は reason) を JRA 公式サイトから取る.
+
+    JRA にもアクセスを拒否されたら AccessDenied をそのまま投げる (収集を止める)。
+    それ以外で JRA からも取れなければ、両方の理由をつけて同じ種類の例外を投げる。
+    """
+    try:
+        result = fetch(fetcher, *args, **kwargs)
+    except AccessDenied:
+        raise
+    except (FetchError, parsers.ParseError) as exc:
+        raise type(exc)(f"{exc} (netkeiba: {reason})") from exc
+    if result:
+        log.warning("%s: netkeiba で取れないため JRA から取りました (%s)", what, reason)
+    return result
+
+
 def kaisai_dates(fetcher: Fetcher, start: date, end: date, *, refresh: bool = False) -> list[date]:
-    """期間内の開催日 (カレンダーページから)."""
+    """期間内の開催日 (カレンダーページから). 読めなければ JRA の開催一覧、それもだめなら土日を総当たり."""
     out: list[date] = []
     today = date.today()
     for y, m in _months(start, end):
         url = urls.calendar(y, m)
         next_month = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
-        # 月が終わる前に取ったカレンダーは、代替開催の追加などに備えて月末後に一度取り直す
-        html = fetcher.get(url, live=(y, m) >= (today.year, today.month), refresh=refresh,
-                           stale_before=_jst_midnight(next_month + timedelta(days=7)))
-        found = [date(int(s[:4]), int(s[4:6]), int(s[6:])) for s in parsers.extract_kaisai_dates(html)]
+        reason: Exception | None = None
+        try:
+            # 月が終わる前に取ったカレンダーは、代替開催の追加などに備えて月末後に一度取り直す
+            html = fetcher.get(url, live=(y, m) >= (today.year, today.month), refresh=refresh,
+                               stale_before=_jst_midnight(next_month + timedelta(days=7)))
+        except FetchError as exc:
+            reason, found = exc, []
+        else:
+            found = [date(int(s[:4]), int(s[4:6]), int(s[6:])) for s in parsers.extract_kaisai_dates(html)]
+        if not found and reason is None:
+            # 読めないページは _failed/ に移して次回また読む
+            kept = fetcher.keep_failed(url)
+            reason = parsers.ParseError(f"{y}年{m}月のカレンダーが読めません (取得したページ: {kept})")
+        if not found and fetcher.jra_fallback:
+            try:
+                found = _from_jra(fetcher, f"{y}年{m}月の開催日", reason, jra.kaisai_dates, y, m, refresh=refresh)
+            except AccessDenied:
+                raise
+            except (FetchError, parsers.ParseError) as exc:
+                log.warning("%s", exc)
         if not found:
-            # カレンダーが読めなければ土日を総当たりする (キャッシュは捨てて次回また読む)
-            fetcher.invalidate(url)
-            log.warning("%d年%d月のカレンダーが読めないため土日を総当たりします", y, m)
+            if not isinstance(reason, parsers.ParseError):
+                raise reason  # 通信できない (netkeiba も JRA も) ときは、これまでどおり止める
+            # カレンダーが読めなければ土日を総当たりする
+            log.warning("%s。土日を総当たりします", reason)
             d = date(y, m, 1)
             while d.month == m:
                 if d.weekday() >= 5:
@@ -63,7 +83,7 @@ def kaisai_dates(fetcher: Fetcher, start: date, end: date, *, refresh: bool = Fa
 
 
 def race_ids_for_date(fetcher: Fetcher, day: date, *, refresh: bool = False) -> list[str]:
-    """開催日のレース一覧. race.netkeiba で取れなければ db.netkeiba を見る.
+    """開催日のレース一覧. race.netkeiba で取れなければ db.netkeiba、それもだめなら JRA を見る.
 
     開催日が終わる前に取った一覧 (未発表で空・一部だけなど) は確定後に一度取り直し、
     レースが1つも無い一覧はキャッシュに残さない。
@@ -75,24 +95,60 @@ def race_ids_for_date(fetcher: Fetcher, day: date, *, refresh: bool = False) -> 
     for url in (urls.race_list(key), urls.db_race_list(key)):
         try:
             ids = parsers.extract_race_ids(fetcher.get(url, live=live, refresh=refresh, stale_before=stale_before))
-        except AccessDenied:
-            raise
-        except FetchError as exc:
+        except FetchError as exc:  # アクセス拒否も含む. 同じサイトの2つ目は通信せずに拒否になる
             last_exc = exc
             continue
         if ids:
             return ids
         fetcher.invalidate(url)
+    # JRA の結果一覧には終わった開催日しか無いので、先の日は見に行かない
+    if fetcher.jra_fallback and day <= date.today():
+        reason = last_exc or "レース一覧が空です"
+        try:
+            ids = _from_jra(fetcher, f"{day} のレース一覧", reason, jra.race_ids_for_date, day, refresh=refresh)
+        except AccessDenied:
+            raise
+        except (FetchError, parsers.ParseError) as exc:
+            if last_exc is None:  # netkeiba では空だっただけなら、これまでどおり空で返す
+                log.warning("%s", exc)
+                return []
+            raise FetchError(str(exc)) from exc
+        if ids:
+            return ids
     if last_exc is not None:
         raise last_exc
     return []
 
 
-def collect_race(conn: sqlite3.Connection, fetcher: Fetcher, race_id: str, *, refresh: bool = False) -> bool:
-    """確定成績1レース分を保存する。保存できたら True."""
+def _race_from_jra(
+    conn: sqlite3.Connection, fetcher: Fetcher, race_id: str, reason: Exception, race_date: date | None, refresh: bool
+) -> dict:
+    """netkeiba で取れなかった確定成績を JRA から取る. 予備を使わない場合は reason を投げ直す."""
+    if not fetcher.jra_fallback:
+        raise reason
+    if race_date is None:
+        known = db.get_race(conn, race_id)
+        race_date = date.fromisoformat(known["date"]) if known and known.get("date") else None
+    if isinstance(reason, parsers.RaceNotFound) and (race_date is None or race_date >= date.today()):
+        # race_id の誤りか、結果がまだのレース。日付の分からないレースのために JRA の月一覧を総なめにしない
+        raise reason
+    return _from_jra(fetcher, race_id, reason, jra.fetch_result, race_id, race_date=race_date, refresh=refresh)
+
+
+def collect_race(
+    conn: sqlite3.Connection, fetcher: Fetcher, race_id: str, *, refresh: bool = False, race_date: date | None = None
+) -> bool:
+    """確定成績1レース分を保存する。保存できたら True.
+
+    netkeiba で取れなければ (アクセス拒否・ページの変更など)、JRA 公式サイトから取る (設定 sources.jra_fallback)。
+    race_date が分かっていれば JRA で探すページが減る。
+    """
     if not refresh and db.has_results(conn, race_id):
         return False
-    parsed = _parse(fetcher, urls.race_result(race_id), parsers.parse_race_result, race_id, refresh=refresh)
+    try:
+        parsed = _parse(fetcher, urls.race_result(race_id), parsers.parse_race_result, race_id, refresh=refresh)
+    except (FetchError, parsers.ParseError) as exc:
+        parsed = _race_from_jra(conn, fetcher, race_id, exc, race_date, refresh)
     db.save_race(conn, parsed["race"])
     db.save_results(conn, race_id, parsed["results"])
     db.save_payouts(conn, race_id, parsed["payouts"])
@@ -122,7 +178,7 @@ def collect_results(
         new = 0
         for race_id in ids:
             try:
-                new += collect_race(conn, fetcher, race_id, refresh=refresh)
+                new += collect_race(conn, fetcher, race_id, refresh=refresh, race_date=day)
             except AccessDenied:
                 raise
             except (FetchError, parsers.ParseError) as exc:

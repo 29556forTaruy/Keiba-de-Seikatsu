@@ -181,8 +181,15 @@ def test_lists():
 
 
 def test_parse_error_on_empty_page():
-    with pytest.raises(parsers.ParseError):
+    with pytest.raises(parsers.ParseError) as info:
         parsers.parse_race_result("<html><body>no data</body></html>", "202405040911")
+    assert not isinstance(info.value, parsers.RaceNotFound)
+
+
+def test_race_result_1970_template_is_race_not_found():
+    """存在しない race_id は 1970年1月1日 の空ページになる. 成績表が無いという誤解を招く表示にしない."""
+    with pytest.raises(parsers.RaceNotFound, match="race_id の誤り"):
+        parsers.parse_race_result(read("race_result_empty.html"), "202405040911")
 
 
 @pytest.mark.parametrize("text, expected", [

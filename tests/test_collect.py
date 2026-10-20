@@ -9,7 +9,7 @@ import pytest
 
 from keiba import db
 from keiba.scraper import collect, parsers, urls
-from keiba.scraper.http import AccessDenied, Fetcher, FetchError
+from keiba.scraper.http import FAILED_DIR, AccessDenied, Fetcher, FetchError
 
 FIX = Path(__file__).parent / "fixtures"
 JST = timezone(timedelta(hours=9))
@@ -56,6 +56,40 @@ def test_unparsable_result_page_is_not_cached(fetcher, tmp_path):
     # 2回目以降はキャッシュも DB もあるので通信しない
     assert collect.collect_race(conn, fetcher, race_id) is False
     assert fetcher.network_requests == 2
+
+
+def test_unparsable_page_is_kept_for_debugging(fetcher, tmp_path):
+    """パースできなかったページは data/raw/_failed/ に残し、エラーに置き場所を出す."""
+    conn = db.connect(tmp_path / "k.sqlite")
+    race_id = "202405040911"
+    url = urls.race_result(race_id)
+    html = "<html><body>見出しが変わったページ</body></html>"
+    fetcher.pages[url] = html
+    with pytest.raises(parsers.ParseError) as info:
+        collect.collect_race(conn, fetcher, race_id)
+    kept = fetcher.cache_dir / FAILED_DIR / fetcher.cache_path(url).relative_to(fetcher.cache_dir)
+    assert str(kept) in str(info.value)
+    assert gzip.decompress(kept.read_bytes()).decode("utf-8") == html
+    assert not fetcher.cache_path(url).exists()
+
+    # 次回は取り直す。直らなければ前回分を上書きする
+    fetcher.pages[url] = html.replace("ページ", "ページ2")
+    with pytest.raises(parsers.ParseError):
+        collect.collect_race(conn, fetcher, race_id)
+    assert fetcher.network_requests == 2
+    assert "ページ2" in gzip.decompress(kept.read_bytes()).decode("utf-8")
+
+
+def test_missing_race_is_reported_and_not_kept(fetcher, tmp_path):
+    """存在しない race_id の空ページ (1970年1月1日) は、その旨を伝え、調査用にも残さない."""
+    conn = db.connect(tmp_path / "k.sqlite")
+    race_id = "202405040911"
+    url = urls.race_result(race_id)
+    fetcher.pages[url] = fix("race_result_empty.html")
+    with pytest.raises(parsers.RaceNotFound, match="race_id の誤り"):
+        collect.collect_race(conn, fetcher, race_id)
+    assert not fetcher.cache_path(url).exists()
+    assert not (fetcher.cache_dir / FAILED_DIR).exists()
 
 
 def test_card_only_db_builds_report(fetcher, tmp_path):
@@ -200,6 +234,7 @@ def test_unreadable_calendar_is_not_cached(fetcher):
     days = collect.kaisai_dates(fetcher, date(2024, 10, 1), date(2024, 10, 31))
     assert date(2024, 10, 5) in days  # 土日の総当たり
     assert not fetcher.cache_path(url).exists()
+    assert (fetcher.cache_dir / FAILED_DIR / fetcher.cache_path(url).relative_to(fetcher.cache_dir)).exists()
 
 
 def test_broken_cache_is_refetched(fetcher):

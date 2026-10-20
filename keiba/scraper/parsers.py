@@ -1,7 +1,7 @@
 """netkeiba のHTMLを辞書に変換する純粋関数群.
 
 HTMLの列順が変わっても壊れにくいよう、表は見出しセルの文字列で列を特定する。
-パースに失敗したら ParseError を投げ、保存済みHTML (data/raw) をテスト用
+パースに失敗したら ParseError を投げ、保存済みHTML (data/raw/_failed) をテスト用
 フィクスチャにして直せるようにしている。
 """
 
@@ -25,6 +25,14 @@ from keiba.constants import (
 
 class ParseError(ValueError):
     pass
+
+
+class RaceNotFound(ParseError):
+    """中身の無いレースページ. パーサーの不具合ではないので、ページを調査用に残さない."""
+
+
+# 存在しない race_id や、まだ結果の出ていないレースの結果ページは、日付が 1970年1月1日 の空のひな形になる
+_EMPTY_PAGE_DATE = "1970-01-01"
 
 
 # ---------------------------------------------------------------- 文字列ユーティリティ
@@ -279,6 +287,8 @@ def parse_race_result(html: str, race_id: str) -> dict[str, Any]:
 
     small = cell_text(intro.select_one("p.smalltxt"))
     race["date"] = _parse_date(small) or _parse_date(cell_text(soup.find("title")))
+    if race["date"] == _EMPTY_PAGE_DATE:
+        raise RaceNotFound(f"レースのページが空です: {race_id} (race_id の誤りか、まだ結果が出ていないレースです)")
     if race["date"] is None:
         raise ParseError(f"開催日が読み取れません: {race_id}")
     m = re.search(r"\d+回\S+?\d+日目\s*(.*)", small)
