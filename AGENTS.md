@@ -5,6 +5,7 @@
 ## 構成
 
 - `keiba/scraper/` netkeiba の取得（間隔制御・gzip キャッシュ）とパース。パーサーは純粋関数で、見出しの文字列で列を特定する。
+  netkeiba で確定成績・開催日・レース一覧が取れないときは、JRA 公式サイト（`jra.py` がページをたどり、`jra_parsers.py` が同じ形に直す）から取る。JRA のページ指定（CNAME）の検査値は計算せず、前のページのリンクから読む。
 - `keiba/db.py` SQLite。`races` `results` `entries` `payouts` `odds` `horses` `news` `analyses` `predictions`。
 - `keiba/features.py` 特徴量。過去成績と出馬表を 1 つの表にして同じ処理を通す。
 - `keiba/model.py` HistGradientBoosting → レース内ソフトマックス（温度 τ）→ オッズとの対数線形ブレンド。

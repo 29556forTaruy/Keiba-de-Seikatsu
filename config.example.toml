@@ -16,6 +16,11 @@ reports = "reports"
 min_interval = 1.5
 jitter = 0.5
 
+[sources]
+# netkeiba で確定成績・レース一覧・開催日が取れないとき (アクセス拒否・ページの変更など)、
+# JRA 公式サイト (www.jra.go.jp) から取る。間隔は netkeiba と同じ http.min_interval を守る。
+jra_fallback = true
+
 [betting]
 bankroll = 100000          # 資金 (円)
 kelly_fraction = 0.25      # ケリー基準の何割を賭けるか (0.25 = 1/4ケリー)

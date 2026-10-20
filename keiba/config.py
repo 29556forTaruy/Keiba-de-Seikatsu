@@ -34,6 +34,10 @@ DEFAULTS: dict[str, Any] = {
             "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
         ),
     },
+    "sources": {
+        # netkeiba で成績・レース一覧・開催日が取れないとき、JRA 公式サイトから取る
+        "jra_fallback": True,
+    },
     "betting": {
         "bankroll": 100_000,
         "kelly_fraction": 0.25,
